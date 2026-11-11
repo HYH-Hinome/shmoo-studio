@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
+import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import type { Axis, ShmooDataset, SiteGrid } from '@shared/types/shmoo'
 import { CELL_FAIL, CELL_PASS } from '@shared/types/shmoo'
 import { DEFAULT_PADDING, cellCenter, computeGeometry, hitTest, tickDecimals } from '../chart/geometry'
 import type { CellIndex, ChartGeometry } from '../chart/geometry'
 import { drawBoundaryLayer, drawInteractionLayer, drawStaticLayer } from '../chart/render2d'
 import type { ChartColorMode, MotionInput } from '../chart/render2d'
+import type { SliceRef } from '../chart/slice'
 import { computeMarginTints } from '../chart/colors'
 import type { ChartPerf } from '../chart/perf'
 import { useLayeredCanvas } from '../chart/useLayeredCanvas'
@@ -39,6 +40,10 @@ interface Shmoo2DChartProps {
   xAxis: Axis
   yAxis: Axis
   mode: ChartColorMode
+  /** 切片标记（返回 2D 后仍保留），null 表示没有 */
+  sliceMarker?: SliceRef | null
+  /** 双击某格时触发：切出该格所在的行（列可通过切片视图内的标签切换） */
+  onSlice?: (ref: SliceRef) => void
 }
 
 /** 当前悬停的格子（只保存索引，像素位置由几何实时算出） */
@@ -78,7 +83,15 @@ function formatMeasure(value: number, range: { min: number; max: number } | null
   return value.toFixed(decimals)
 }
 
-export function Shmoo2DChart({ dataset, site, xAxis, yAxis, mode }: Shmoo2DChartProps): JSX.Element {
+export function Shmoo2DChart({
+  dataset,
+  site,
+  xAxis,
+  yAxis,
+  mode,
+  sliceMarker = null,
+  onSlice
+}: Shmoo2DChartProps): JSX.Element {
   const reducedMotion = useReducedMotion()
 
   // ---- 绘制阶段需要的最新状态（用 ref 保存，renderers 只依赖 ref，不会因 state 变化重建） ----
@@ -126,7 +139,13 @@ export function Shmoo2DChart({ dataset, site, xAxis, yAxis, mode }: Shmoo2DChart
         const geometry = geometryRef.current
         if (!geometry) return
         const startedAt = performance.now()
-        drawStaticLayer(ctx, size, { ...dataInput, geometry, mode: modeRef.current, motion: motionRef.current })
+        drawStaticLayer(ctx, size, {
+          ...dataInput,
+          geometry,
+          mode: modeRef.current,
+          motion: motionRef.current,
+          sliceMarker
+        })
         perfRef.current.frames += 1
         recordTiming('static', performance.now() - startedAt)
       },
@@ -146,14 +165,17 @@ export function Shmoo2DChart({ dataset, site, xAxis, yAxis, mode }: Shmoo2DChart
         const geometry = geometryRef.current
         if (!geometry) return
         const startedAt = performance.now()
+        const active = hoverVisibleRef.current ? hoverRef.current : null
         drawInteractionLayer(ctx, size, {
           geometry,
-          hover: hoverVisibleRef.current ? hoverRef.current : null
+          hover: active,
+          // 悬停整行提示：只依赖当前格子的行号，hover 变化时重绘这一层即可
+          hoverRow: active ? active.iy : null
         })
         recordTiming('interaction', performance.now() - startedAt)
       }
     }
-  }, [dataset.valueLabel, dataset.valueUnit, site, xAxis, yAxis, recordTiming, marginTints])
+  }, [dataset.valueLabel, dataset.valueUnit, site, xAxis, yAxis, recordTiming, marginTints, sliceMarker])
 
   const { containerRef, canvasRefs, size, repaint } = useLayeredCanvas(renderers)
 
@@ -208,6 +230,11 @@ export function Shmoo2DChart({ dataset, site, xAxis, yAxis, mode }: Shmoo2DChart
     repaint('interaction')
   }, [hover, hoverVisible, repaint])
 
+  // 切片标记只在静态层：变化时重绘静态层（返回 2D 后标记要立刻出现）
+  useEffect(() => {
+    repaint('static')
+  }, [sliceMarker, repaint])
+
   // 开发模式下把耗时采样挂到 window，供浏览器自动化实测读取（生产构建不执行）
   useEffect(() => {
     if (!import.meta.env.DEV) return
@@ -215,16 +242,21 @@ export function Shmoo2DChart({ dataset, site, xAxis, yAxis, mode }: Shmoo2DChart
   }, [])
 
   // ---- 指针交互 ----
-  const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
+  /**
+   * 把鼠标坐标换算成格子索引。
+   * getBoundingClientRect 含边框，clientLeft/clientTop 是边框宽度，需要减掉才是画布内坐标。
+   */
+  const cellFromPoint = (clientX: number, clientY: number): CellIndex | null => {
     const container = containerRef.current
-    if (!container || size.width < 2) return
-
-    // getBoundingClientRect 含边框，clientLeft/clientTop 是边框宽度，需要减掉才能得到画布内坐标
+    if (!container || size.width < 2) return null
     const rect = container.getBoundingClientRect()
-    const px = event.clientX - rect.left - container.clientLeft
-    const py = event.clientY - rect.top - container.clientTop
-    const cell = hitTest(geometry, px, py)
+    const px = clientX - rect.left - container.clientLeft
+    const py = clientY - rect.top - container.clientTop
+    return hitTest(geometry, px, py)
+  }
 
+  const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const cell = cellFromPoint(event.clientX, event.clientY)
     if (!cell) {
       // 指针在轴/图例/留白上：隐藏十字线与浮层，但不立即清空 hover 数据（浮层需要淡出）
       if (hoverVisible) setHoverVisible(false)
@@ -233,6 +265,21 @@ export function Shmoo2DChart({ dataset, site, xAxis, yAxis, mode }: Shmoo2DChart
 
     if (!hover || hover.ix !== cell.ix || hover.iy !== cell.iy) setHover(cell)
     if (!hoverVisible) setHoverVisible(true)
+  }
+
+  /**
+   * 双击切片。
+   *
+   * 事件顺序说明：阶段 ⑤ 会加入“单击锁定”，届时单击处理需要延迟到双击判定窗口之后
+   * （约 250ms）再执行；这里不注册 onClick，因此不会吞掉双击，也无需 preventDefault。
+   * 用原生 dblclick 而不是自己数两次 pointerdown，触摸板轻点与高 DPI 屏都能稳定触发。
+   */
+  const handleDoubleClick = (event: ReactMouseEvent<HTMLDivElement>): void => {
+    if (!onSlice) return
+    const cell = cellFromPoint(event.clientX, event.clientY)
+    if (!cell) return
+    // 默认切“行”（固定 y 扫 x）；列方向在切片视图里用标签切换
+    onSlice({ axis: 'row', index: cell.iy })
   }
 
   const handlePointerLeave = (): void => {
@@ -272,6 +319,7 @@ export function Shmoo2DChart({ dataset, site, xAxis, yAxis, mode }: Shmoo2DChart
       ref={containerRef}
       onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
+      onDoubleClick={handleDoubleClick}
       data-chart-root="1"
     >
       <canvas ref={canvasRefs.static} className="shmoo-chart__canvas" aria-hidden="true" />

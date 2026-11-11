@@ -13,7 +13,11 @@ import { useAppStore } from '../state/store'
  *
  *   ?demo=1                  载入 samples/sample-2d-mcu.csv（二值模式）
  *   ?demo=1&mode=heat        以热力模式打开
+ *   ?demo=1&sample=1d        载入 1D 样例 samples/sample-1d-vdd.csv
+ *   ?demo=1&sample=1d&form=curve  1D 以连续曲线形态打开（默认色带）
  *   ?demo=1&hover=21,9       载入后在该格子上触发一次 pointermove（截图用，越界会被忽略）
+ *                           1D 数据集写成 ?hover=7（按采样下标吸附）
+ *   ?demo=1&slice=row:12     载入 2D 样例后直接切出第 12 行（列切片写 slice=col:8）
  *   ?demo=1&bench=1          额外跑 1920×1080 @ DPR2 的静态层压测，结果写入 window.__shmooBench
  *
  * 生产构建时 main.tsx 中的 `import.meta.env.DEV` 分支会被静态剔除，
@@ -21,7 +25,8 @@ import { useAppStore } from '../state/store'
  */
 
 /** 演示数据文件名（真实样例，不是随机生成的假数据） */
-const DEMO_FILE = 'sample-2d-mcu.csv'
+const DEMO_2D = { file: 'sample-2d-mcu.csv', loader: () => import('../../../samples/sample-2d-mcu.csv?raw') }
+const DEMO_1D = { file: 'sample-1d-vdd.csv', loader: () => import('../../../samples/sample-1d-vdd.csv?raw') }
 
 /** 轮询等待元素出现（React 挂载与首帧测量需要一点时间） */
 async function waitFor<T>(getter: () => T | null, timeout = 4000): Promise<T | null> {
@@ -40,15 +45,16 @@ async function waitFor<T>(getter: () => T | null, timeout = 4000): Promise<T | n
 }
 
 /** 解析并写入 store（只做阶段 ② 已有的解析链路，不伪造数据） */
-async function loadDemoDataset(): Promise<ShmooDataset | null> {
+async function loadDemoDataset(sample: '2d' | '1d'): Promise<ShmooDataset | null> {
+  const source = sample === '1d' ? DEMO_1D : DEMO_2D
   const [{ default: text }, { parseCsvInWorker }] = await Promise.all([
-    import('../../../samples/sample-2d-mcu.csv?raw'),
+    source.loader(),
     import('../lib/parseCsv')
   ])
 
   const { dataset, report } = await parseCsvInWorker({
     text,
-    fileName: DEMO_FILE,
+    fileName: source.file,
     filePath: null
   })
   if (!dataset) {
@@ -68,30 +74,34 @@ async function loadDemoDataset(): Promise<ShmooDataset | null> {
 
   // 仅开发模式：把演示数据集挂到 window，供截图/像素自检脚本核对“画出来的颜色 = 数据本身”
   window.__shmooDemo = { dataset, site: dataset.sites[0] }
+  // store 本体也暴露出去：切片方向、悬停行等状态便于自动化断言
+  window.__shmooStore = useAppStore
   return dataset
 }
 
 /**
- * 按 `?hover=ix,iy` 在图表上派发一次 pointermove，
- * 让十字线/浮层处于“悬停中”的状态，便于截取交互态截图。
+ * 按 `?hover=ix,iy` 在图表上派发一次 pointermove。
+ * 2D 用两个下标；1D 只需一个采样下标（`?hover=7`），内部按 iy = 0 处理。
  */
 async function applyHover(dataset: ShmooDataset, spec: string): Promise<void> {
-  const [ix, iy] = spec.split(',').map((part) => Number(part))
+  const parts = spec.split(',').map((part) => Number(part))
+  const ix = parts[0]
+  const iy = dataset.kind === '1d' ? 0 : parts[1]
   if (!Number.isInteger(ix) || !Number.isInteger(iy)) {
-    console.warn('[demo] hover 参数应为 "xIndex,yIndex"', spec)
+    console.warn('[demo] hover 参数应为 "xIndex,yIndex"（1D 可只写 xIndex）', spec)
     return
   }
   // 行列数由数据决定（30×30 只是样例），这里按真实轴长做越界保护，
   // 避免换数据集后 hover 坐标越界、cellCenter 取到 edges 之外的 NaN。
   const nx = dataset.xAxis.values.length
-  const ny = dataset.yAxis?.values.length ?? 0
+  const ny = dataset.yAxis?.values.length ?? 1
   if (ix < 0 || ix >= nx || iy < 0 || iy >= ny) {
     console.warn(`[demo] hover 索引越界：(${ix}, ${iy})，当前网格 ${nx}×${ny}`)
     return
   }
 
   const container = await waitFor(() => document.querySelector<HTMLElement>('.shmoo-chart'))
-  if (!container || !dataset.yAxis) return
+  if (!container) return
 
   // 等画布完成首帧测量：canvas.width 还是默认值 300 时说明 ResizeObserver 尚未写入尺寸，
   // 此时组件会忽略 pointermove（尺寸 < 2 直接返回）。
@@ -102,7 +112,13 @@ async function applyHover(dataset: ShmooDataset, spec: string): Promise<void> {
 
   const width = container.clientWidth
   const height = container.clientHeight
-  const geometry = computeGeometry(width, height, DEFAULT_PADDING, dataset.xAxis.values, dataset.yAxis.values)
+  const geometry = computeGeometry(
+    width,
+    height,
+    DEFAULT_PADDING,
+    dataset.xAxis.values,
+    dataset.yAxis?.values ?? [0]
+  )
   const center = cellCenter(geometry, ix, iy)
   const rect = container.getBoundingClientRect()
 
@@ -193,12 +209,18 @@ export async function maybeLoadDemo(): Promise<void> {
   const params = new URLSearchParams(window.location.search)
   if (params.get('demo') !== '1') return
 
-  const dataset = await loadDemoDataset()
+  const sample = params.get('sample') === '1d' ? '1d' : '2d'
+  const dataset = await loadDemoDataset(sample)
   if (!dataset) return
 
   const mode = params.get('mode')
   if (mode === 'heat' || mode === 'binary') {
     useAppStore.setState({ colorMode: mode })
+  }
+
+  const form = params.get('form')
+  if (form === 'band' || form === 'curve') {
+    useAppStore.setState({ oneDForm: form })
   }
 
   // 二值配色已在阶段 ③c 定稿为 A′（青绿 PASS / 正红 FAIL），不再提供版本切换参数
@@ -209,5 +231,21 @@ export async function maybeLoadDemo(): Promise<void> {
   const hover = params.get('hover')
   if (hover) await applyHover(dataset, hover)
 
-  if (params.get('bench') === '1') runBench(dataset)
+  // 切片：?slice=row:12 / ?slice=col:8（截图与自检用，不写 index 时默认第 0 行）
+  const sliceParam = params.get('slice')
+  if (sliceParam && dataset.kind === '2d') {
+    const [axisRaw, indexRaw] = sliceParam.includes(':') ? sliceParam.split(':') : ['row', sliceParam]
+    const axis = axisRaw === 'col' ? 'col' : 'row'
+    const index = Number(indexRaw)
+    if (Number.isInteger(index)) {
+      useAppStore.getState().openSlice({ axis, index })
+      // 等切片视图真正挂载：面包屑是切片视图独有的元素
+      await waitFor(() => document.querySelector('.crumb'))
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    } else {
+      console.warn('[demo] slice 参数应为 "row:index" 或 "col:index"', sliceParam)
+    }
+  }
+
+  if (params.get('bench') === '1' && dataset.kind === '2d') runBench(dataset)
 }

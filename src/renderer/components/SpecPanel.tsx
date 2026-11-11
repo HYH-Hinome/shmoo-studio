@@ -1,24 +1,61 @@
 import { computePassRate } from '@shared/csv/parser'
 import { evaluatePoint, isSpecComplete } from '@shared/spec/evaluate'
 import { formatPercent, formatSigned } from '../lib/format'
+import { tickDecimals } from '../chart/geometry'
+import { findPassRuns, pickPrimaryRun } from '../chart/oneD'
+import { buildSliceSeries, worstMarginOfSeries } from '../chart/slice'
 import { useAppStore } from '../state/store'
 
 /**
  * 右侧规格面板。
  * 按决策 D1：spec 全局共用一份，不按 site 区分，所以面板不出现 site 选择。
  * 本阶段展示的都是解析出来的真实 spec 与统计（输入控件仍 disabled，实时编辑在阶段 ⑥ 接入）。
+ *
+ * 阶段 ④ 追加：进入 2D 切片视图后，这里改为显示“这条曲线”的统计
+ * （通过率 / 最差 margin / 通过区间），而不是整个数据集的汇总。
  */
 export function SpecPanel(): JSX.Element {
   const spec = useAppStore((s) => s.spec)
   const dataset = useAppStore((s) => s.dataset)
+  const activeSiteId = useAppStore((s) => s.activeSiteId)
+  const slice = useAppStore((s) => s.slice)
 
   const passRate = dataset ? computePassRate(dataset) : null
   const specReady = isSpecComplete(spec)
 
+  // 切片统计：只有 2D 数据集 + 当前站点 + 激活的切片三者齐备时才成立
+  const sliceSeries = (() => {
+    if (!dataset || dataset.kind !== '2d' || !slice) return null
+    const site = dataset.sites.find((item) => item.siteId === activeSiteId)
+    if (!site) return null
+    return buildSliceSeries(dataset, site, slice)
+  })()
+
+  const sliceStats = (() => {
+    if (!sliceSeries) return null
+    let known = 0
+    let pass = 0
+    for (let i = 0; i < sliceSeries.value.length; i++) {
+      if (!Number.isFinite(sliceSeries.value[i])) continue
+      known += 1
+      if (sliceSeries.pass[i] === 1) pass += 1
+    }
+    const primary = pickPrimaryRun(findPassRuns(sliceSeries.axis.values, sliceSeries.pass))
+    const decimals = tickDecimals(sliceSeries.axis.values)
+    const unit = sliceSeries.axis.unit ? ` ${sliceSeries.axis.unit}` : ''
+    return {
+      passRate: known > 0 ? pass / known : null,
+      worstMargin: worstMarginOfSeries(sliceSeries, spec),
+      window: primary
+        ? `${primary.startX.toFixed(decimals)} – ${primary.endX.toFixed(decimals)}${unit}`
+        : '无连续 PASS 区间'
+    }
+  })()
+
   // 最差 margin：遍历所有已知单元，取最小值（越负越危险）。
   // 数据量最多几千点，单次渲染成本可忽略；等阶段 ⑥ 支持编辑 spec 时再考虑做增量缓存。
   let worstMargin: number | null = null
-  if (dataset) {
+  if (dataset && !sliceStats) {
     for (const site of dataset.sites) {
       for (let i = 0; i < site.value.length; i++) {
         const value = site.value[i]
@@ -34,7 +71,7 @@ export function SpecPanel(): JSX.Element {
     <aside className="panel" aria-label="规格判定">
       <div className="panel__head">规格判定</div>
       <p className="panel__note">
-        全局共用一份 spec，修改后所有 site 同步重算。
+        {sliceStats ? '当前显示切片曲线的最差 margin 与通过区间。' : '全局共用一份 spec，修改后所有 site 同步重算。'}
         {dataset && !specReady ? ' 当前未配置 spec，所有点位判为未知。' : ''}
       </p>
 
@@ -63,17 +100,25 @@ export function SpecPanel(): JSX.Element {
         <div className="panel__stats">
           <div className="stat">
             <span className="stat__label">通过率</span>
-            <span className="stat__value">{formatPercent(passRate)}</span>
+            <span className="stat__value">
+              {formatPercent(sliceStats ? sliceStats.passRate : passRate)}
+            </span>
           </div>
           <div className="stat">
             <span className="stat__label">最差 margin</span>
             <span className="stat__value">
-              {formatSigned(worstMargin)}
-              {worstMargin !== null && dataset?.valueUnit ? (
+              {formatSigned(sliceStats ? sliceStats.worstMargin : worstMargin)}
+              {dataset?.valueUnit ? (
                 <span className="stat__unit"> {dataset.valueUnit}</span>
               ) : null}
             </span>
           </div>
+          {sliceStats ? (
+            <div className="stat stat--wide">
+              <span className="stat__label">通过区间</span>
+              <span className="stat__value">{sliceStats.window}</span>
+            </div>
+          ) : null}
         </div>
 
         <label className="field">

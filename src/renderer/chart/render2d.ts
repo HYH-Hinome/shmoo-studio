@@ -67,12 +67,22 @@ export interface MotionInput {
 /** 静态层绘制参数 */
 export interface StaticLayerInput extends ChartDataInput {
   motion: MotionInput
+  /**
+   * 切片标记：从切片视图返回 2D 后仍然保留，提示“刚才看的是这一行/列”。
+   * 只画虚线框 + 极淡提亮，不改变色块本身的读数。
+   */
+  sliceMarker?: { axis: 'row' | 'col'; index: number } | null
 }
 
 /** 交互层绘制参数 */
 export interface InteractionLayerInput {
   geometry: ChartGeometry
   hover: CellIndex | null
+  /**
+   * 悬停所在的行号：整行铺一层很淡的白色，暗示“双击这一行可以切片”。
+   * 只提示、不抢注意力，因此透明度固定 8%，不做动画。
+   */
+  hoverRow?: number | null
   /** 悬停格对应的值，用于在十字线端点显示读数（可选） */
   hoverValue?: string | null
 }
@@ -230,10 +240,61 @@ export function drawStaticLayer(
     plot.h - 7
   )
 
-  // 5. 坐标轴（刻度对齐真实采样值）
+  // 5. 切片标记：虚线框标出刚才切出去的那一行/列（仅在返回 2D 后出现）
+  drawSliceMarker(ctx, size, input)
+
+  // 6. 坐标轴（刻度对齐真实采样值）
   drawAxes(ctx, size, input)
-  // 6. 图例
+  // 7. 图例
   drawLegend(ctx, size, input)
+}
+
+/**
+ * 切片标记：虚线框 + 6% 白色提亮。
+ * 时间顺序上，它出现在色块与网格之后、坐标轴之前，保证轴刻度不会被盖住。
+ */
+function drawSliceMarker(
+  ctx: CanvasRenderingContext2D,
+  size: CanvasSize,
+  input: StaticLayerInput
+): void {
+  const marker = input.sliceMarker
+  if (!marker) return
+
+  const { geometry } = input
+  const { plot } = geometry
+  const { dpr } = size
+
+  let left = plot.x
+  let top = plot.y
+  let width = plot.w
+  let height = plot.h
+
+  if (marker.axis === 'row') {
+    if (marker.index < 0 || marker.index + 1 >= geometry.y.edges.length) return
+    top = geometry.y.edges[marker.index + 1]
+    height = geometry.y.edges[marker.index] - top
+  } else {
+    if (marker.index < 0 || marker.index + 1 >= geometry.x.edges.length) return
+    left = geometry.x.edges[marker.index]
+    width = geometry.x.edges[marker.index + 1] - left
+  }
+  if (width <= 0 || height <= 0) return
+
+  const x = snap(left, dpr)
+  const y = snap(top, dpr)
+  const w = Math.max(1, snap(left + width, dpr) - x)
+  const h = Math.max(1, snap(top + height, dpr) - y)
+
+  ctx.fillStyle = 'rgba(230, 238, 247, 0.06)'
+  ctx.fillRect(x, y, w, h)
+
+  ctx.save()
+  ctx.strokeStyle = CHART_STRUCTURE.hoverBorder
+  ctx.lineWidth = 1
+  ctx.setLineDash([5, 3])
+  ctx.strokeRect(x + 0.5 / dpr, y + 0.5 / dpr, w - 1 / dpr, h - 1 / dpr)
+  ctx.restore()
 }
 
 /** 坐标轴：轴线 + 刻度 + 抽稀标签 + 轴标题 */
@@ -553,6 +614,16 @@ export function drawInteractionLayer(
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, width, height)
   if (!hover || plot.w <= 2) return
+
+  // 整行提示：8% 白色叠加，覆盖绘图区整行（含格子之间的缝隙），
+  // 目的是让“这一行可以被双击切开”这件事在不喧宾夺主的前提下可被察觉。
+  const hoverRow = input.hoverRow
+  if (typeof hoverRow === 'number' && hoverRow >= 0 && hoverRow < geometry.y.edges.length - 1) {
+    const top = geometry.y.edges[hoverRow + 1]
+    const bottom = geometry.y.edges[hoverRow]
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.08)'
+    ctx.fillRect(plot.x, snap(top, dpr), plot.w, snap(bottom, dpr) - snap(top, dpr))
+  }
 
   const center = cellCenter(geometry, hover.ix, hover.iy)
   const cx = snap(center.x, dpr)

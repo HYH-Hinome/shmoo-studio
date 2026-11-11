@@ -637,6 +637,50 @@ select {
   cursor: default;
 }
 
+/* 切片面包屑：与 .segmented 同高（2+22+2 + 上下边框），切换 2D/切片时工具栏不抖 */
+.crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 28px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-inset);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+.crumb__link {
+  height: 20px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-accent);
+  font: inherit;
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
+}
+
+.crumb__link:hover {
+  background: var(--color-bg-active);
+  color: var(--color-text-primary);
+}
+
+.crumb__sep {
+  color: var(--color-text-disabled);
+}
+
+.crumb__item {
+  color: var(--color-text-primary);
+}
+
+.crumb__current {
+  color: var(--color-accent);
+}
+
 /* 画布占位区：网格底纹 + 扫描线 + 四角标记 */
 .stage__canvas {
   position: relative;
@@ -922,6 +966,18 @@ select {
   font-variant-numeric: tabular-nums;
   font-size: var(--text-lg);
   color: var(--color-text-primary);
+}
+
+/* 占满整行的大块统计（如切片通过区间）：数值较长，降一号字并禁止换行 */
+.stat--wide {
+  grid-column: 1 / -1;
+}
+
+.stat--wide .stat__value {
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 统计值里的单位：比主数值小一号，避免抢读数 */

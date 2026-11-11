@@ -14,6 +14,8 @@ declare global {
     __shmooBench?: ChartBench
     /** 仅开发模式：演示数据集，供像素自检脚本核对渲染结果 */
     __shmooDemo?: { dataset: ShmooDataset; site: SiteGrid }
+    /** 仅开发模式：zustand store 本体，供切片/悬停等状态自检读取 */
+    __shmooStore?: typeof import('./state/store').useAppStore
   }
 }
 
