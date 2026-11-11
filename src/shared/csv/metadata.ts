@@ -13,16 +13,36 @@ export interface ParsedMetadata {
   spec: SpecLimit | null
 }
 
+/** `spec: none` 的等价写法（大小写不敏感） */
+const SPEC_NONE_TOKENS = new Set(['none', 'off', 'n/a', 'na'])
+
+/**
+ * 纯数值文本：允许正负号、小数、科学计数法。
+ * 注意 `Number('720mV')` 是 NaN，这里额外区分“带单位”和“纯乱码”，
+ * 以便给出更准确的错误提示。
+ */
+const SPEC_NUMBER_PATTERN = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/
+
 /**
  * 解析 spec 字符串，支持：
- *   min=720
- *   max=860
- *   min=740,max=860
- *   window 模式下必须同时给出 min 与 max
+ *   none                       显式声明不比较 spec
+ *   min=720                    单边下限
+ *   max=860                    单边上限
+ *   min=740,max=860            双边窗口
+ *   min=1,max=1                零宽窗口（只接受恰好等于 1，用于 0/1 pattern）
+ *
+ * 约束：
+ *  - 数值不得带单位（单位统一由 `value_unit` 决定，避免同一文件两套单位）；
+ *  - min 与 max 同时给出且 min > max 时报错；
+ *  - `none` 不能与 min/max 混用。
+ *
  * 解析失败抛错，由调用方转成 SPEC 警告（不中断导入）。
  */
 export function parseSpecValue(raw: string): SpecLimit {
-  const parts = raw
+  const trimmed = raw.trim()
+  if (SPEC_NONE_TOKENS.has(trimmed.toLowerCase())) return { mode: 'none' }
+
+  const parts = trimmed
     .split(/[,;\s]+/)
     .map((part) => part.trim())
     .filter(Boolean)
@@ -30,11 +50,23 @@ export function parseSpecValue(raw: string): SpecLimit {
   const spec: SpecLimit = { mode: 'min' }
 
   for (const part of parts) {
+    if (SPEC_NONE_TOKENS.has(part.toLowerCase())) {
+      throw new Error('spec 中的 none 不能与 min/max 同时出现')
+    }
+
     const [rawKey, rawValue] = part.split('=')
     if (rawValue === undefined) throw new Error(`spec 片段缺少等号：${part}`)
     const key = rawKey.trim().toLowerCase()
-    const value = Number(rawValue.trim())
-    if (!Number.isFinite(value)) throw new Error(`spec 数值非法：${part}`)
+    const valueText = rawValue.trim()
+
+    if (!SPEC_NUMBER_PATTERN.test(valueText)) {
+      // 字母后缀通常意味着用户把单位写进了 spec，例如 min=720mV
+      if (/[a-zA-Z]/.test(valueText)) {
+        throw new Error(`spec 数值不能带单位（单位以 value_unit 为准）：${valueText}`)
+      }
+      throw new Error(`spec 数值非法：${part}`)
+    }
+    const value = Number(valueText)
 
     if (key === 'min') spec.min = value
     else if (key === 'max') spec.max = value
@@ -44,8 +76,9 @@ export function parseSpecValue(raw: string): SpecLimit {
 
   const hasMin = typeof spec.min === 'number'
   const hasMax = typeof spec.max === 'number'
-  if (!hasMin && !hasMax) throw new Error('spec 至少需要 min 或 max')
+  if (!hasMin && !hasMax) throw new Error('spec 至少需要 min 或 max（或写 none）')
   if (hasMin && hasMax) {
+    // min === max 合法：等价于“恰好等于该值”，用于 0/1 pattern 判定
     if ((spec.min as number) > (spec.max as number)) {
       throw new Error('spec 的 min 大于 max')
     }

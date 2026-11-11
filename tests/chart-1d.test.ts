@@ -3,6 +3,7 @@ import {
   buildOneDSeries,
   computeValueScale,
   findPassRuns,
+  findRunBoundaries,
   nearestSampleIndex,
   niceTicks,
   pickPrimaryRun,
@@ -50,6 +51,87 @@ describe('findPassRuns', () => {
   it('全 FAIL / 全 UNKNOWN 返回空数组', () => {
     expect(findPassRuns(x, Uint8Array.from([CELL_FAIL, CELL_FAIL]))).toEqual([])
     expect(findPassRuns(x, Uint8Array.from([CELL_UNKNOWN]))).toEqual([])
+  })
+})
+
+describe('findRunBoundaries', () => {
+  it('双边 spec：一段 PASS 两侧给出 4 个边界（下限失效/恢复 + 上限恢复/失效）', () => {
+    // 值随扫描值单调上升：低端低于 720，高端高于 860，中间落在窗口内
+    const value = Float32Array.from([700, 710, 730, 800, 850, 870, 900])
+    const state = Uint8Array.from([
+      CELL_FAIL,
+      CELL_FAIL,
+      CELL_PASS,
+      CELL_PASS,
+      CELL_PASS,
+      CELL_FAIL,
+      CELL_FAIL
+    ])
+    const run = findPassRuns(x, state)[0]
+    const boundaries = findRunBoundaries(x, value, state, run, {
+      mode: 'window',
+      min: 720,
+      max: 860
+    })
+    expect(boundaries.map((b) => [b.role, b.index, b.value])).toEqual([
+      ['below-min', 1, 0.7],
+      ['recover-low', 2, 0.8],
+      ['recover-high', 4, 1.0],
+      ['above-max', 5, 1.1]
+    ])
+  })
+
+  it('单边下限：只给出下限一侧的两个边界', () => {
+    const value = Float32Array.from([700, 710, 730, 760, 800, 820, 850])
+    const state = Uint8Array.from([
+      CELL_FAIL,
+      CELL_FAIL,
+      CELL_PASS,
+      CELL_PASS,
+      CELL_PASS,
+      CELL_PASS,
+      CELL_PASS
+    ])
+    const run = findPassRuns(x, state)[0]
+    const boundaries = findRunBoundaries(x, value, state, run, { mode: 'min', min: 720 })
+    expect(boundaries.map((b) => b.role)).toEqual(['below-min', 'recover-low'])
+  })
+
+  it('零宽窗口（pattern）：0 算低于下限，不会凭空出现上限失效', () => {
+    const value = Float32Array.from([0, 1, 1, 0, 1, 0, 0])
+    const state = Uint8Array.from([
+      CELL_FAIL,
+      CELL_PASS,
+      CELL_PASS,
+      CELL_FAIL,
+      CELL_PASS,
+      CELL_FAIL,
+      CELL_FAIL
+    ])
+    const run = findPassRuns(x, state)[0]
+    const boundaries = findRunBoundaries(x, value, state, run, {
+      mode: 'window',
+      min: 1,
+      max: 1
+    })
+    expect(boundaries.map((b) => b.role)).toEqual(['below-min', 'recover-low', 'recover-high'])
+  })
+
+  it('相邻失败点不是“越界”（例如缺失点）时不会误标边界', () => {
+    const value = Float32Array.from([Number.NaN, 800, 810, 820, 830, 840, 850])
+    const state = Uint8Array.from([
+      CELL_UNKNOWN,
+      CELL_PASS,
+      CELL_PASS,
+      CELL_PASS,
+      CELL_PASS,
+      CELL_PASS,
+      CELL_PASS
+    ])
+    const run = findPassRuns(x, state)[0]
+    const boundaries = findRunBoundaries(x, value, state, run, { mode: 'min', min: 720 })
+    // 前一个点是 UNKNOWN，不构成边界；单边下限只有恢复点
+    expect(boundaries.map((b) => b.role)).toEqual(['recover-low'])
   })
 })
 

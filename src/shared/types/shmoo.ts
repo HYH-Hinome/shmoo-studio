@@ -32,8 +32,17 @@ export interface Axis {
   scale: AxisScale
 }
 
-/** 规格模式：双边窗口 / 仅下限 / 仅上限 */
-export type SpecMode = 'window' | 'min' | 'max'
+/**
+ * 规格模式：
+ *  - window：双边窗口（min 与 max 同时给出；两者相等时等价于“恰好等于该值”，
+ *    用于 0/1 pattern 这类离散判定）；
+ *  - min / max：单边；
+ *  - none：显式声明“不比较 spec”（此时所有 measued 点位为未知）。
+ */
+export type SpecMode = 'window' | 'min' | 'max' | 'none'
+
+/** margin 归属的一侧：距离更近 / 被违反的那条边界 */
+export type SpecSide = 'min' | 'max'
 
 /**
  * 规格限制。按已确认决策 D1：spec 全局共用一份，挂在 ShmooDataset 顶层，
@@ -124,13 +133,20 @@ export interface ShmooDataset {
   revision: number
 }
 
-/** 单个点位的判定结果，供 hover 浮层使用 */
+/** 单个点位的判定结果，供 hover 浮层与规格面板使用 */
 export interface CellEvaluation {
   state: CellState
   /** 到最近边界的距离（与测量值同单位）；无数据或未配置 spec 时为 null */
   margin: number | null
   /** margin 占区间宽度的百分比（0–1，可为负）；无法计算时为 null */
   marginPct: number | null
+  /**
+   * margin 归属于哪一侧：
+   *  - 单边模式恒为对应边；
+   *  - 双边模式取「距下限 / 距上限中较小者」，即 margin 的来源边；
+   *  - 无数据 / 未配置 spec / spec 为 none 时为 null。
+   */
+  side: SpecSide | null
 }
 
 /** 导入报告：阶段 ② 的解析器产出，阶段 ① 先定义结构 */

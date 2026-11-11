@@ -325,8 +325,17 @@ export function parseShmooCsv(
   const spec: SpecLimit = metadata.spec ?? { mode: 'min' }
   const passSource = metadata.entries['pass_source']?.trim().toLowerCase() === 'file' ? 'file' : 'derived'
 
-  if (passSource === 'derived' && valueType === 'measured' && !metadata.spec) {
-    collector.add('warn', ISSUE_CODES.NO_SPEC, '未提供 spec，所有点位将被判为未知')
+  // R16：derived 但没有可用的 spec（缺省或显式 none）→ 全部未知，给出提示
+  if (
+    passSource === 'derived' &&
+    valueType === 'measured' &&
+    (!metadata.spec || metadata.spec.mode === 'none')
+  ) {
+    const message =
+      metadata.spec?.mode === 'none'
+        ? 'spec 为 none，不参与比较，所有点位将被判为未知'
+        : '未提供 spec，所有点位将被判为未知'
+    collector.add('warn', ISSUE_CODES.NO_SPEC, message)
   }
 
   // ---------- 6. 建轴与网格 ----------

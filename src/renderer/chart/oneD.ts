@@ -1,5 +1,5 @@
 import type { ShmooDataset, SiteGrid, SpecLimit } from '@shared/types/shmoo'
-import { CELL_PASS } from '@shared/types/shmoo'
+import { CELL_FAIL, CELL_PASS } from '@shared/types/shmoo'
 
 /**
  * 1D Shmoo 的纯计算逻辑（无 DOM 依赖，便于单元测试）。
@@ -88,6 +88,87 @@ export function pickPrimaryRun(runs: PassRun[]): PassRun | null {
     if (run.width === best.width && run.count > best.count) return run
     return best
   })
+}
+
+/** PASS 窗口的边界角色（双边 spec 会给出 4 个边界值） */
+export type RunBoundaryRole = 'below-min' | 'recover-low' | 'recover-high' | 'above-max'
+
+/** 一个可标注的窗口边界 */
+export interface RunBoundary {
+  role: RunBoundaryRole
+  /** 采样下标 */
+  index: number
+  /** 该采样点的扫描值（x） */
+  value: number
+}
+
+/** 边界角色的中文短标签，画布标注与测试共用同一份文案 */
+export const RUN_BOUNDARY_LABEL: Record<RunBoundaryRole, string> = {
+  'below-min': '下限失效',
+  'recover-low': '下限恢复',
+  'recover-high': '上限恢复',
+  'above-max': '上限失效'
+}
+
+/**
+ * 求出一段 PASS 区间两侧的边界值。
+ *
+ * 双边 spec 下，一段通过区间通常被两个失效区夹住，因此会给出 4 个边界：
+ *   下限失效（最后一个低于 min 的采样点）
+ *   下限恢复（第一个进入窗口的采样点）
+ *   上限恢复（最后一个仍在窗口内的采样点）
+ *   上限失效（第一个高于 max 的采样点）
+ * 单边 spec 只给出对应一侧的两个边界。
+ *
+ * 只按采样点取边界，不做插值 —— 与窗口宽度“保守下界”的口径保持一致。
+ */
+export function findRunBoundaries(
+  x: number[],
+  value: Float32Array,
+  state: Uint8Array,
+  run: PassRun,
+  spec: SpecLimit
+): RunBoundary[] {
+  const result: RunBoundary[] = []
+  const hasMin = typeof spec.min === 'number' && spec.mode !== 'none'
+  const hasMax = typeof spec.max === 'number' && spec.mode !== 'none'
+  if (!hasMin && !hasMax) return result
+
+  const push = (role: RunBoundaryRole, index: number): void => {
+    if (index < 0 || index >= x.length) return
+    result.push({ role, index, value: x[index] })
+  }
+
+  if (hasMin) {
+    const prev = run.startIndex - 1
+    // 只有“确实低于下限”的失败点才算下限失效；缺失点 / 其它失败原因不标
+    if (
+      prev >= 0 &&
+      state[prev] === CELL_FAIL &&
+      Number.isFinite(value[prev]) &&
+      value[prev] < (spec.min as number)
+    ) {
+      push('below-min', prev)
+    }
+    push('recover-low', run.startIndex)
+  }
+
+  if (hasMax) {
+    push('recover-high', run.endIndex)
+    const next = run.endIndex + 1
+    if (
+      next < x.length &&
+      state[next] === CELL_FAIL &&
+      Number.isFinite(value[next]) &&
+      value[next] > (spec.max as number)
+    ) {
+      push('above-max', next)
+    }
+  }
+
+  // 按扫描值升序返回，调用方直接按顺序摆放标签即可
+  result.sort((a, b) => a.value - b.value)
+  return result
 }
 
 /**

@@ -146,6 +146,141 @@ describe('样例基准 · sample-1d-vdd.csv', () => {
   })
 })
 
+describe('样例基准 · sample-2d-window.csv（双边失效在两端）', () => {
+  const SAMPLE_WINDOW = readFileSync(
+    new URL('../samples/sample-2d-window.csv', import.meta.url),
+    'utf8'
+  )
+  const { dataset, report } = parseShmooCsv(SAMPLE_WINDOW, { fileName: 'sample-2d-window.csv' })
+
+  it('解析为 2D 30 × 30 × 4 site，spec 为双边窗口', () => {
+    const data = dataset as ShmooDataset
+    expect(data.kind).toBe('2d')
+    expect(data.xAxis.values).toHaveLength(30)
+    expect(data.yAxis?.values).toHaveLength(30)
+    expect(data.sites).toHaveLength(4)
+    expect(data.spec).toEqual({ mode: 'window', min: 720, max: 860 })
+    expect(report.issues.some((issue) => issue.level === 'error')).toBe(false)
+  })
+
+  it('低 VDD 与高 VDD 两端都失效，中间窗口通过', () => {
+    const data = dataset as ShmooDataset
+    const nx = data.xAxis.values.length
+    for (const site of data.sites) {
+      // 第一列（最低 VDD）全部 fail，且原因是低于下限
+      for (let iy = 0; iy < 30; iy++) {
+        const index = iy * nx
+        expect(site.pass[index]).toBe(CELL_FAIL)
+        expect(site.value[index]).toBeLessThan(720)
+      }
+      // 最后一列（最高 VDD）全部 fail，且原因是高于上限
+      for (let iy = 0; iy < 30; iy++) {
+        const index = iy * nx + (nx - 1)
+        expect(site.pass[index]).toBe(CELL_FAIL)
+        expect(site.value[index]).toBeGreaterThan(860)
+      }
+      // 中间列存在通过点，说明窗口确实在两端夹出了通过区
+      expect(site.passCount).toBeGreaterThan(0)
+    }
+  })
+})
+
+describe('样例基准 · sample-2d-pattern.csv（0/1 pattern）', () => {
+  const SAMPLE_PATTERN = readFileSync(
+    new URL('../samples/sample-2d-pattern.csv', import.meta.url),
+    'utf8'
+  )
+  const { dataset, report } = parseShmooCsv(SAMPLE_PATTERN, { fileName: 'sample-2d-pattern.csv' })
+
+  it('spec 为 min=max=1，value 只有 0/1', () => {
+    const data = dataset as ShmooDataset
+    expect(data.spec).toEqual({ mode: 'window', min: 1, max: 1 })
+    const seen = new Set<number>()
+    for (const site of data.sites) {
+      for (let i = 0; i < site.value.length; i++) {
+        if (Number.isFinite(site.value[i])) seen.add(site.value[i])
+      }
+    }
+    expect([...seen].sort()).toEqual([0, 1])
+    expect(report.issues.some((issue) => issue.level === 'error')).toBe(false)
+  })
+
+  it('判定口径为“恰好等于 1”：pass 点数与 value=1 的点数一致', () => {
+    const data = dataset as ShmooDataset
+    for (const site of data.sites) {
+      let ones = 0
+      for (let i = 0; i < site.value.length; i++) {
+        if (site.value[i] === 1) ones += 1
+        if (site.value[i] === 0) expect(site.pass[i]).toBe(CELL_FAIL)
+        if (site.value[i] === 1) expect(site.pass[i]).toBe(CELL_PASS)
+      }
+      expect(site.passCount).toBe(ones)
+      // 不规则通过区：既不能全通，也不能全灭
+      expect(ones).toBeGreaterThan(50)
+      expect(ones).toBeLessThan(900)
+    }
+  })
+})
+
+describe('spec 元数据 · 单边 / 双边 / none / 零宽', () => {
+  /** 用同一行数据 + 不同 spec 元数据解析，专注验证 spec 识别 */
+  function parseWithSpec(specLine: string): ReturnType<typeof parseShmooCsv> {
+    const text = makeCsv(['0.6,1.0,1,1,700'], { meta: [specLine] })
+    return parseShmooCsv(text, { fileName: 'spec.csv' })
+  }
+
+  it('只有 min → 单边下限', () => {
+    expect(parseWithSpec('# spec: min=720').dataset?.spec).toEqual({ mode: 'min', min: 720 })
+  })
+
+  it('只有 max → 单边上限', () => {
+    expect(parseWithSpec('# spec: max=860').dataset?.spec).toEqual({ mode: 'max', max: 860 })
+  })
+
+  it('min 与 max 同时给出 → 双边窗口', () => {
+    expect(parseWithSpec('# spec: min=720,max=860').dataset?.spec).toEqual({
+      mode: 'window',
+      min: 720,
+      max: 860
+    })
+  })
+
+  it('min === max → 合法的零宽窗口（pattern 用法）', () => {
+    expect(parseWithSpec('# spec: min=1,max=1').dataset?.spec).toEqual({
+      mode: 'window',
+      min: 1,
+      max: 1
+    })
+  })
+
+  it('none → 不比较 spec，并给出 R16 提示', () => {
+    // 没有 pass 列才会走 derived 判定，R16 才有意义
+    const text = makeCsv(['0.6,1.0,1,700'], {
+      meta: ['# spec: none'],
+      header: 'x,y,site,value'
+    })
+    const { dataset } = parseShmooCsv(text, { fileName: 'none.csv' })
+    expect(dataset?.spec).toEqual({ mode: 'none' })
+    expect(issueCount(dataset, ISSUE_CODES.NO_SPEC)).toBe(1)
+  })
+
+  it('spec 数值带单位 → SPEC 警告（单位应写在 value_unit）', () => {
+    const { dataset } = parseWithSpec('# spec: min=720mV')
+    expect(issueCount(dataset, ISSUE_CODES.BAD_SPEC)).toBe(1)
+    expect(dataset?.spec.mode).not.toBe('window')
+  })
+
+  it('min 大于 max → SPEC 警告，不静默接受', () => {
+    const { dataset } = parseWithSpec('# spec: min=900,max=800')
+    expect(issueCount(dataset, ISSUE_CODES.BAD_SPEC)).toBe(1)
+  })
+
+  it('none 与 min/max 混用 → SPEC 警告', () => {
+    const { dataset } = parseWithSpec('# spec: none,min=720')
+    expect(issueCount(dataset, ISSUE_CODES.BAD_SPEC)).toBe(1)
+  })
+})
+
 describe('R1 · BOM / CRLF / 末尾空行归一化', () => {
   it('BOM + CRLF 与 LF 文本解析结果一致', () => {
     const lf = makeCsv(['0.6,1.0,1,1,700', '0.7,1.0,1,1,750'])

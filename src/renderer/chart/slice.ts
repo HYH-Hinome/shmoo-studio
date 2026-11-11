@@ -1,4 +1,4 @@
-import type { Axis, ShmooDataset, SiteGrid, SpecLimit } from '@shared/types/shmoo'
+import type { Axis, ShmooDataset, SiteGrid, SpecLimit, SpecSide } from '@shared/types/shmoo'
 import { CELL_UNKNOWN } from '@shared/types/shmoo'
 import { evaluatePoint } from '@shared/spec/evaluate'
 import { tickDecimals } from './geometry'
@@ -164,13 +164,30 @@ export function buildSliceDataset(
   return { dataset: sliceDataset, site: sliceSite, series }
 }
 
-/** 一条切片上最差的 margin（越负越危险）；没有可判定点时返回 null */
-export function worstMarginOfSeries(series: SliceSeries, spec: SpecLimit): number | null {
-  let worst: number | null = null
+/** 切片上的最差 margin，以及它撞到的是哪一条边界 */
+export interface SeriesWorstMargin {
+  margin: number
+  side: SpecSide | null
+}
+
+/**
+ * 一条切片上最差的 margin（越负越危险）；没有可判定点时返回 null。
+ * side 一并返回，供规格面板标注“撞上限 / 撞下限”。
+ */
+export function worstPointOfSeries(
+  series: SliceSeries,
+  spec: SpecLimit
+): SeriesWorstMargin | null {
+  let worst: SeriesWorstMargin | null = null
   for (let i = 0; i < series.value.length; i++) {
-    const { margin } = evaluatePoint(series.value[i], spec)
+    const { margin, side } = evaluatePoint(series.value[i], spec)
     if (margin === null) continue
-    if (worst === null || margin < worst) worst = margin
+    if (worst === null || margin < worst.margin) worst = { margin, side }
   }
   return worst
+}
+
+/** 兼容旧调用：只取最差 margin 的数值 */
+export function worstMarginOfSeries(series: SliceSeries, spec: SpecLimit): number | null {
+  return worstPointOfSeries(series, spec)?.margin ?? null
 }

@@ -1,9 +1,10 @@
 import { computePassRate } from '@shared/csv/parser'
-import { evaluatePoint, isSpecComplete } from '@shared/spec/evaluate'
+import { evaluatePoint, isMarginMeaningful, isSpecComplete } from '@shared/spec/evaluate'
+import type { SpecSide } from '@shared/types/shmoo'
 import { formatPercent, formatSigned } from '../lib/format'
 import { tickDecimals } from '../chart/geometry'
 import { findPassRuns, pickPrimaryRun } from '../chart/oneD'
-import { buildSliceSeries, worstMarginOfSeries } from '../chart/slice'
+import { buildSliceSeries, worstPointOfSeries } from '../chart/slice'
 import { useAppStore } from '../state/store'
 
 /**
@@ -43,29 +44,40 @@ export function SpecPanel(): JSX.Element {
     const primary = pickPrimaryRun(findPassRuns(sliceSeries.axis.values, sliceSeries.pass))
     const decimals = tickDecimals(sliceSeries.axis.values)
     const unit = sliceSeries.axis.unit ? ` ${sliceSeries.axis.unit}` : ''
+    const worst = worstPointOfSeries(sliceSeries, spec)
     return {
       passRate: known > 0 ? pass / known : null,
-      worstMargin: worstMarginOfSeries(sliceSeries, spec),
+      worstMargin: worst?.margin ?? null,
+      worstSide: worst?.side ?? null,
       window: primary
         ? `${primary.startX.toFixed(decimals)} – ${primary.endX.toFixed(decimals)}${unit}`
         : '无连续 PASS 区间'
     }
   })()
 
-  // 最差 margin：遍历所有已知单元，取最小值（越负越危险）。
+  // 最差 margin：遍历所有已知单元，取最小值（越负越危险），并记住它撞到哪一边。
   // 数据量最多几千点，单次渲染成本可忽略；等阶段 ⑥ 支持编辑 spec 时再考虑做增量缓存。
   let worstMargin: number | null = null
+  let worstSide: SpecSide | null = null
   if (dataset && !sliceStats) {
     for (const site of dataset.sites) {
       for (let i = 0; i < site.value.length; i++) {
         const value = site.value[i]
         if (!Number.isFinite(value)) continue
-        const { margin } = evaluatePoint(value, spec)
+        const { margin, side } = evaluatePoint(value, spec)
         if (margin === null) continue
-        if (worstMargin === null || margin < worstMargin) worstMargin = margin
+        if (worstMargin === null || margin < worstMargin) {
+          worstMargin = margin
+          worstSide = side
+        }
       }
     }
   }
+
+  // 二值 / 零宽窗口数据：margin 没有连续量意义，直接显示“不适用”
+  const marginUsable = dataset ? isMarginMeaningful(dataset) : false
+  const shownMargin = sliceStats ? sliceStats.worstMargin : worstMargin
+  const shownSide = sliceStats ? sliceStats.worstSide : worstSide
 
   return (
     <aside className="panel" aria-label="规格判定">
@@ -73,6 +85,9 @@ export function SpecPanel(): JSX.Element {
       <p className="panel__note">
         {sliceStats ? '当前显示切片曲线的最差 margin 与通过区间。' : '全局共用一份 spec，修改后所有 site 同步重算。'}
         {dataset && !specReady ? ' 当前未配置 spec，所有点位判为未知。' : ''}
+        {dataset && !marginUsable && specReady
+          ? ' 当前数据为二值/零宽窗口，margin 无连续量意义，显示为不适用。'
+          : ''}
       </p>
 
       <div className="panel__body">
@@ -82,6 +97,7 @@ export function SpecPanel(): JSX.Element {
             <option value="min">单边 · 下限</option>
             <option value="max">单边 · 上限</option>
             <option value="window">双边 · 窗口</option>
+            <option value="none">无 spec · 不比较</option>
           </select>
         </label>
 
@@ -107,10 +123,22 @@ export function SpecPanel(): JSX.Element {
           <div className="stat">
             <span className="stat__label">最差 margin</span>
             <span className="stat__value">
-              {formatSigned(sliceStats ? sliceStats.worstMargin : worstMargin)}
-              {dataset?.valueUnit ? (
-                <span className="stat__unit"> {dataset.valueUnit}</span>
-              ) : null}
+              {marginUsable ? (
+                <>
+                  {formatSigned(shownMargin)}
+                  {dataset?.valueUnit ? (
+                    <span className="stat__unit"> {dataset.valueUnit}</span>
+                  ) : null}
+                  {/* 双边 spec 下标明最差点撞的是上限还是下限；单边时恒为同一侧，不重复 */}
+                  {shownSide && spec.mode === 'window' ? (
+                    <span className="stat__unit">
+                      （{shownSide === 'max' ? '上限' : '下限'}）
+                    </span>
+                  ) : null}
+                </>
+              ) : (
+                '不适用'
+              )}
             </span>
           </div>
           {sliceStats ? (

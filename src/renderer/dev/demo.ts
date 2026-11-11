@@ -15,6 +15,8 @@ import { useAppStore } from '../state/store'
  *   ?demo=1&mode=heat        以热力模式打开
  *   ?demo=1&sample=1d        载入 1D 样例 samples/sample-1d-vdd.csv
  *   ?demo=1&sample=1d&form=curve  1D 以连续曲线形态打开（默认色带）
+ *   ?demo=1&sample=window    载入双边窗口样例（低/高 VDD 两端都失效）
+ *   ?demo=1&sample=pattern   载入 0/1 pattern 样例（spec: min=1 max=1，热力按钮会置灰）
  *   ?demo=1&hover=21,9       载入后在该格子上触发一次 pointermove（截图用，越界会被忽略）
  *                           1D 数据集写成 ?hover=7（按采样下标吸附）
  *   ?demo=1&slice=row:12     载入 2D 样例后直接切出第 12 行（列切片写 slice=col:8）
@@ -27,6 +29,24 @@ import { useAppStore } from '../state/store'
 /** 演示数据文件名（真实样例，不是随机生成的假数据） */
 const DEMO_2D = { file: 'sample-2d-mcu.csv', loader: () => import('../../../samples/sample-2d-mcu.csv?raw') }
 const DEMO_1D = { file: 'sample-1d-vdd.csv', loader: () => import('../../../samples/sample-1d-vdd.csv?raw') }
+const DEMO_WINDOW = {
+  file: 'sample-2d-window.csv',
+  loader: () => import('../../../samples/sample-2d-window.csv?raw')
+}
+const DEMO_PATTERN = {
+  file: 'sample-2d-pattern.csv',
+  loader: () => import('../../../samples/sample-2d-pattern.csv?raw')
+}
+
+/** 演示样例标识 → 文件与加载器 */
+type DemoSample = '2d' | '1d' | 'window' | 'pattern'
+
+const DEMO_SAMPLES: Record<DemoSample, { file: string; loader: () => Promise<{ default: string }> }> = {
+  '2d': DEMO_2D,
+  '1d': DEMO_1D,
+  window: DEMO_WINDOW,
+  pattern: DEMO_PATTERN
+}
 
 /** 轮询等待元素出现（React 挂载与首帧测量需要一点时间） */
 async function waitFor<T>(getter: () => T | null, timeout = 4000): Promise<T | null> {
@@ -45,8 +65,8 @@ async function waitFor<T>(getter: () => T | null, timeout = 4000): Promise<T | n
 }
 
 /** 解析并写入 store（只做阶段 ② 已有的解析链路，不伪造数据） */
-async function loadDemoDataset(sample: '2d' | '1d'): Promise<ShmooDataset | null> {
-  const source = sample === '1d' ? DEMO_1D : DEMO_2D
+async function loadDemoDataset(sample: DemoSample): Promise<ShmooDataset | null> {
+  const source = DEMO_SAMPLES[sample]
   const [{ default: text }, { parseCsvInWorker }] = await Promise.all([
     source.loader(),
     import('../lib/parseCsv')
@@ -209,7 +229,10 @@ export async function maybeLoadDemo(): Promise<void> {
   const params = new URLSearchParams(window.location.search)
   if (params.get('demo') !== '1') return
 
-  const sample = params.get('sample') === '1d' ? '1d' : '2d'
+  // 只接受白名单内的取值，避免随手写个 ?sample=xxx 导致动态 import 报错
+  const sampleRaw = params.get('sample')
+  const sample: DemoSample =
+    sampleRaw === '1d' || sampleRaw === 'window' || sampleRaw === 'pattern' ? sampleRaw : '2d'
   const dataset = await loadDemoDataset(sample)
   if (!dataset) return
 

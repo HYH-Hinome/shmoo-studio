@@ -1,5 +1,6 @@
-import type { ShmooDataset, SiteGrid } from '@shared/types/shmoo'
+import type { ShmooDataset, SiteGrid, SpecSide } from '@shared/types/shmoo'
 import { CELL_FAIL, CELL_PASS, CELL_UNKNOWN } from '@shared/types/shmoo'
+import { evaluatePoint } from '@shared/spec/evaluate'
 import {
   BINARY_PALETTE,
   CHART_STRUCTURE,
@@ -15,8 +16,15 @@ import {
 } from './geometry'
 import type { CanvasSize } from './render2d'
 import { drawCellHatch } from './render2d'
-import { computeValueScale, findPassRuns, pickPrimaryRun, valueToY } from './oneD'
-import type { PassRun, ValueScale } from './oneD'
+import {
+  RUN_BOUNDARY_LABEL,
+  computeValueScale,
+  findPassRuns,
+  findRunBoundaries,
+  pickPrimaryRun,
+  valueToY
+} from './oneD'
+import type { PassRun, RunBoundary, ValueScale } from './oneD'
 
 /**
  * 1D Shmoo 绘制（Canvas 2D）。
@@ -207,6 +215,10 @@ function drawBand(
   const xDecimals = tickDecimals(x)
   const runs = findPassRuns(x, site.pass)
   const primary = pickPrimaryRun(runs)
+  // 主窗口的边界：双边 spec 下是 4 个（下限失效 / 恢复 + 上限恢复 / 失效）
+  const boundaries: RunBoundary[] = primary
+    ? findRunBoundaries(x, site.value, site.pass, primary, dataset.spec)
+    : []
 
   // 1. 窗口信息：说明“这段色带里哪一截是通过的、边界在哪”
   ctx.font = FONT_MONO
@@ -219,6 +231,20 @@ function drawBand(
     plot.x,
     plot.y + 12
   )
+
+  // 1b. 边界值明细：双边时把 4 个边界都写出来，单边只写该侧两个
+  if (boundaries.length > 0) {
+    const unit = dataset.xAxis.unit ? ` (${dataset.xAxis.unit})` : ''
+    const detailed = boundaries
+      .map((b) => `${RUN_BOUNDARY_LABEL[b.role]} ${b.value.toFixed(xDecimals)}`)
+      .join(' · ')
+    const compact = `${boundaries.map((b) => b.value.toFixed(xDecimals)).join(' / ')}${unit}`
+    const text = ctx.measureText(`${detailed}${unit}`).width <= plot.w - 4
+      ? `${detailed}${unit}`
+      : compact
+    ctx.fillStyle = CHART_STRUCTURE.legendMuted
+    ctx.fillText(text, plot.x, plot.y + 28)
+  }
 
   // 2. 色带：逐点画竖条，颜色与 2D 二值模式完全同源
   const clipRight = plot.x + plot.w * reveal
@@ -255,42 +281,41 @@ function drawBand(
   ctx.lineTo(plot.x + plot.w * reveal, snap(bandBottom, dpr) + 0.5 / dpr)
   ctx.stroke()
 
-  // 4. 边界：最长 PASS 区间的首末采样点，虚线落到 x 轴，值标在色带上方
+  // 4. 边界：每个边界采样点画一条虚线落到 x 轴，数值标在色带上方。
+  //    双边时会有 4 个（下限失效 / 下限恢复 / 上限恢复 / 上限失效），
+  //    相邻边界可能只隔一个采样点，因此数值分两行交错摆放，避免互相压住。
   ctx.font = FONT_MONO_SMALL
   ctx.textAlign = 'center'
   // 注意：上一段逐格填充留下了红色 fillStyle，这里必须显式改回刻度文字色，否则标签会被染成红色
   ctx.fillStyle = CHART_STRUCTURE.tickText
-  if (primary) {
-    const boundaries = [
-      { value: primary.startX, index: primary.startIndex, align: 'start' as const },
-      { value: primary.endX, index: primary.endIndex, align: 'end' as const }
-    ]
-    for (const boundary of boundaries) {
-      const bx = snap(centers[boundary.index] ?? plot.x, dpr)
-      if (bx > clipRight) continue
-      ctx.strokeStyle = 'rgba(230, 238, 247, 0.55)'
-      ctx.setLineDash([4, 3])
-      ctx.beginPath()
-      ctx.moveTo(bx + 0.5 / dpr, snap(bandTop, dpr) - 6)
-      ctx.lineTo(bx + 0.5 / dpr, plot.y + plot.h)
-      ctx.stroke()
-      ctx.setLineDash([])
+  boundaries.forEach((boundary, order) => {
+    const bx = snap(centers[boundary.index] ?? plot.x, dpr)
+    if (bx > clipRight) return
 
-      const label = boundary.value.toFixed(xDecimals)
-      const half = ctx.measureText(label).width / 2
-      // 贴边时改成左/右对齐，避免边界值被裁掉
-      if (bx - half < plot.x) {
-        ctx.textAlign = 'left'
-        ctx.fillText(label, plot.x, bandTop - 14)
-      } else if (bx + half > plot.x + plot.w) {
-        ctx.textAlign = 'right'
-        ctx.fillText(label, plot.x + plot.w, bandTop - 14)
-      } else {
-        ctx.textAlign = 'center'
-        ctx.fillText(label, bx, bandTop - 14)
-      }
+    ctx.strokeStyle = 'rgba(230, 238, 247, 0.55)'
+    ctx.setLineDash([4, 3])
+    ctx.beginPath()
+    ctx.moveTo(bx + 0.5 / dpr, snap(bandTop, dpr) - 6)
+    ctx.lineTo(bx + 0.5 / dpr, plot.y + plot.h)
+    ctx.stroke()
+    ctx.setLineDash([])
+
+    const label = boundary.value.toFixed(xDecimals)
+    const half = ctx.measureText(label).width / 2
+    // 奇偶交错：0/2 放上排，1/3 放下排
+    const labelY = bandTop - (order % 2 === 0 ? 14 : 27)
+    // 贴边时改成左/右对齐，避免边界值被裁掉
+    if (bx - half < plot.x) {
+      ctx.textAlign = 'left'
+      ctx.fillText(label, plot.x, labelY)
+    } else if (bx + half > plot.x + plot.w) {
+      ctx.textAlign = 'right'
+      ctx.fillText(label, plot.x + plot.w, labelY)
+    } else {
+      ctx.textAlign = 'center'
+      ctx.fillText(label, bx, labelY)
     }
-  }
+  })
 
   // 5. 图例
   drawBinaryLegend(ctx, plot, [
@@ -333,6 +358,61 @@ function drawSpecLabels(
     ctx.fillStyle = CHART_STRUCTURE.legendText
     ctx.fillText(row.label, plot.x + 7, y)
   }
+}
+
+/** 三角形路径：up=true 顶点朝上（超上限），false 顶点朝下（低于下限） */
+function trianglePath(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  size: number,
+  up: boolean
+): void {
+  ctx.beginPath()
+  if (up) {
+    ctx.moveTo(cx, cy - size)
+    ctx.lineTo(cx + size * 0.92, cy + size * 0.72)
+    ctx.lineTo(cx - size * 0.92, cy + size * 0.72)
+  } else {
+    ctx.moveTo(cx, cy + size)
+    ctx.lineTo(cx + size * 0.92, cy - size * 0.72)
+    ctx.lineTo(cx - size * 0.92, cy - size * 0.72)
+  }
+  ctx.closePath()
+}
+
+/**
+ * 越界点标记（主图用）：用三角形方向区分“撞哪一边”，
+ * 先画深色放大底，再叠红色，保证压在红带/曲线上仍可辨认。
+ */
+function drawFailMarker(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  side: SpecSide | null
+): void {
+  const up = side !== 'min'
+  trianglePath(ctx, cx, cy, 5.2, up)
+  ctx.fillStyle = '#0a0f16'
+  ctx.fill()
+  trianglePath(ctx, cx, cy, 3.5, up)
+  ctx.fillStyle = BINARY_PALETTE.failAnchor
+  ctx.fill()
+  ctx.strokeStyle = '#ff8b84'
+  ctx.lineWidth = 0.9
+  ctx.stroke()
+}
+
+/** 图例用的小三角标记 */
+function drawLegendMarker(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  side: SpecSide
+): void {
+  trianglePath(ctx, cx, cy, 4.2, side !== 'min')
+  ctx.fillStyle = BINARY_PALETTE.failAnchor
+  ctx.fill()
 }
 
 /** 连续曲线形态 */
@@ -486,18 +566,8 @@ function drawCurve(
     const cx = px[ix]
     const cy = valueToY(v, scale, plot.y, plot.h)
     if (state === CELL_FAIL) {
-      // 越界点：深色底环 + 红点，即使叠在红带上也能看清
-      ctx.beginPath()
-      ctx.arc(cx, cy, 4.2, 0, Math.PI * 2)
-      ctx.fillStyle = '#0a0f16'
-      ctx.fill()
-      ctx.beginPath()
-      ctx.arc(cx, cy, 2.9, 0, Math.PI * 2)
-      ctx.fillStyle = BINARY_PALETTE.failAnchor
-      ctx.fill()
-      ctx.strokeStyle = '#ff8b84'
-      ctx.lineWidth = 0.9
-      ctx.stroke()
+      // 越界点：三角形方向表示撞哪一边（▲ 超上限 / ▼ 低于下限）
+      drawFailMarker(ctx, cx, cy, evaluatePoint(v, dataset.spec).side)
     } else if (state === CELL_PASS) {
       ctx.beginPath()
       ctx.arc(cx, cy, 2.1, 0, Math.PI * 2)
@@ -540,12 +610,26 @@ function drawCurve(
   ctx.fill()
   ctx.fillText('合格点', x0 + 16, y)
 
-  y += 18
-  ctx.beginPath()
-  ctx.arc(x0 + 5, y, 3, 0, Math.PI * 2)
-  ctx.fillStyle = BINARY_PALETTE.failAnchor
-  ctx.fill()
-  ctx.fillText('越界点', x0 + 16, y)
+  // 越界点图例：双边 spec 用 ▲ / ▼ 分别表示超上限与低于下限；
+  // 单边只画对应方向的一行，避免图例出现永远用不到的方向
+  const hasMin = typeof spec.min === 'number' && spec.mode !== 'none'
+  const hasMax = typeof spec.max === 'number' && spec.mode !== 'none'
+  if (hasMin && hasMax) {
+    y += 18
+    drawLegendMarker(ctx, x0 + 5, y, 'max')
+    ctx.fillStyle = CHART_STRUCTURE.legendText
+    ctx.fillText('超上限', x0 + 16, y)
+
+    y += 18
+    drawLegendMarker(ctx, x0 + 5, y, 'min')
+    ctx.fillStyle = CHART_STRUCTURE.legendText
+    ctx.fillText('低于下限', x0 + 16, y)
+  } else {
+    y += 18
+    drawLegendMarker(ctx, x0 + 5, y, hasMax ? 'max' : 'min')
+    ctx.fillStyle = CHART_STRUCTURE.legendText
+    ctx.fillText('越界点', x0 + 16, y)
+  }
 
   y += 18
   ctx.strokeStyle = 'rgba(230, 238, 247, 0.55)'

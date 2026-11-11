@@ -2,7 +2,8 @@ import { formatCount, formatSigned } from '../lib/format'
 import { useAppStore } from '../state/store'
 import { tickDecimals } from '../chart/geometry'
 import { findPassRuns, pickPrimaryRun } from '../chart/oneD'
-import { buildSliceDataset, worstMarginOfSeries } from '../chart/slice'
+import { buildSliceDataset, worstPointOfSeries } from '../chart/slice'
+import { isHeatMeaningful, isMarginMeaningful, isZeroWidthWindow } from '@shared/spec/evaluate'
 import { Shmoo1DChart } from './Shmoo1DChart'
 import { Shmoo2DChart } from './Shmoo2DChart'
 
@@ -66,17 +67,26 @@ export function ChartStage(): JSX.Element {
     return `${primary.startX.toFixed(decimals)} – ${primary.endX.toFixed(decimals)}${unit} · 宽 ${primary.width.toFixed(decimals)}${unit}${extra}`
   })()
 
-  // 切片视图要显示“这条曲线自己”的最差 margin，而不是整个数据集的统计
-  const sliceWorstMargin = (() => {
+  // 切片视图要显示“这条曲线自己”的最差 margin（含撞哪一边），而不是整个数据集的统计
+  const sliceWorst = (() => {
     if (!sliceView || !dataset) return null
-    return worstMarginOfSeries(sliceView.series, dataset.spec)
+    return worstPointOfSeries(sliceView.series, dataset.spec)
   })()
+
+  // margin 是否有物理意义：二值/零宽窗口数据只显示“不适用”，不输出假数字
+  const marginUsable = dataset ? isMarginMeaningful(dataset) : false
+  const heatUsable = dataset ? isHeatMeaningful(dataset) : false
+  // 二值数据没有连续量：即使 store 里记着 heat，也按二值渲染，避免出现无意义的色块
+  const effectiveColorMode = heatUsable ? colorMode : 'binary'
 
   // spec 描述文案：未配置时明确提示，而不是显示一个空白的输入框
   const specText = (() => {
     if (!dataset) return '—'
     const unit = dataset.valueUnit
     const { mode, min, max } = dataset.spec
+    if (isZeroWidthWindow(dataset.spec)) {
+      return `${dataset.valueLabel} = ${min} ${unit}`.trim()
+    }
     if (mode === 'window' && typeof min === 'number' && typeof max === 'number') {
       return `${min} ≤ ${dataset.valueLabel} ≤ ${max} ${unit}`.trim()
     }
@@ -86,7 +96,17 @@ export function ChartStage(): JSX.Element {
     if (mode === 'max' && typeof max === 'number') {
       return `${dataset.valueLabel} ≤ ${max} ${unit}`.trim()
     }
+    if (mode === 'none') return 'spec: none（不参与比较）'
     return '未配置 spec（所有点位将判为未知）'
+  })()
+
+  /** 最差 margin 的文案：不可用时明确写“不适用”，可用时带上撞边方向 */
+  const worstMarginText = (() => {
+    if (!marginUsable) return '不适用'
+    if (!sliceWorst) return '—'
+    const side = sliceWorst.side === 'max' ? '上限' : sliceWorst.side === 'min' ? '下限' : ''
+    const unit = chartDataset?.valueUnit ? ` ${chartDataset.valueUnit}` : ''
+    return `${formatSigned(sliceWorst.margin)}${unit}${side ? `（${side}）` : ''}`
   })()
 
   return (
@@ -170,7 +190,7 @@ export function ChartStage(): JSX.Element {
             <>
               <button
                 type="button"
-                className={colorMode === 'binary' ? 'is-active' : undefined}
+                className={effectiveColorMode === 'binary' ? 'is-active' : undefined}
                 disabled={!render2D}
                 onClick={() => setColorMode('binary')}
               >
@@ -178,8 +198,10 @@ export function ChartStage(): JSX.Element {
               </button>
               <button
                 type="button"
-                className={colorMode === 'heat' ? 'is-active' : undefined}
-                disabled={!render2D}
+                className={effectiveColorMode === 'heat' ? 'is-active' : undefined}
+                // 只有 0/1 两种取值时热力没有连续量可映射 → 置灰并给出原因
+                disabled={!render2D || !heatUsable}
+                title={heatUsable ? undefined : '二值数据，无连续量'}
                 onClick={() => setColorMode('heat')}
               >
                 热力
@@ -249,7 +271,11 @@ export function ChartStage(): JSX.Element {
                 <div>
                   <dt>判定来源</dt>
                   <dd className="mono">
-                    {dataset.passSource === 'file' ? 'CSV pass 列' : 'spec 推导'}
+                    {dataset.passSource === 'file'
+                      ? 'CSV pass 列'
+                      : dataset.spec.mode === 'none'
+                        ? 'spec: none'
+                        : 'spec 推导'}
                   </dd>
                 </div>
               </dl>
@@ -260,7 +286,7 @@ export function ChartStage(): JSX.Element {
               site={activeSite}
               xAxis={dataset.xAxis}
               yAxis={dataset.yAxis}
-              mode={colorMode}
+              mode={effectiveColorMode}
               sliceMarker={sliceMarker}
               onSlice={openSlice}
             />
@@ -300,13 +326,7 @@ export function ChartStage(): JSX.Element {
                 </div>
                 <div>
                   <dt>{sliceView ? '最差 margin' : '规格'}</dt>
-                  <dd className="mono">
-                    {sliceView
-                      ? sliceWorstMargin === null
-                        ? '—'
-                        : `${formatSigned(sliceWorstMargin)} ${chartDataset.valueUnit}`.trim()
-                      : specText}
-                  </dd>
+                  <dd className="mono">{sliceView ? worstMarginText : specText}</dd>
                 </div>
               </dl>
             </header>

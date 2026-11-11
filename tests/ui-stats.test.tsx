@@ -26,6 +26,7 @@ import { useAppStore } from '@renderer/state/store'
 // 这里用项目根目录（vitest 的 cwd）拼接样例路径
 const SAMPLE_2D = readFileSync(resolve(process.cwd(), 'samples/sample-2d-mcu.csv'), 'utf8')
 const SAMPLE_1D = readFileSync(resolve(process.cwd(), 'samples/sample-1d-vdd.csv'), 'utf8')
+const SAMPLE_PATTERN = readFileSync(resolve(process.cwd(), 'samples/sample-2d-pattern.csv'), 'utf8')
 
 // React 18 的 act 需要这个全局标记，否则会打印 “not wrapped in act” 警告
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -110,6 +111,63 @@ describe('界面统计 · 2D 样例', () => {
     expect(worst).not.toBeNull()
     expect(worst as number).toBeLessThan(0) // 样例里存在 fail 点，最差 margin 必为负
     expect(html).toContain(formatSigned(worst as number))
+  })
+})
+
+describe('界面统计 · pattern 样例（二值数据降级）', () => {
+  const { dataset, report } = parseShmooCsv(SAMPLE_PATTERN, { fileName: 'sample-2d-pattern.csv' })
+  const data = dataset as ShmooDataset
+  const html = renderLoaded(data, report)
+
+  it('热力按钮置灰并给出“二值数据，无连续量”的提示', () => {
+    // 二值数据没有连续量可映射：按钮必须 disabled，且 title 说明原因
+    expect(html).toMatch(/disabled=""[^>]*title="二值数据，无连续量"/)
+    expect(html).toContain('二值数据，无连续量')
+  })
+
+  it('spec 显示为零宽窗口（BIST = 1），图表正常渲染且无 NaN', () => {
+    expect(html).toContain('2D SHMOO')
+    expect(html).toContain('BIST = 1')
+    expect(html).not.toContain('NaN')
+    // 二值判定仍然生效：通过率是一个真实比例
+    expect(html).toContain(formatPercent(computePassRate(data)))
+  })
+
+  it('margin 显示“不适用”，不输出 0 之类的假数字', () => {
+    expect(html).toContain('最差 margin')
+    expect(html).toContain('不适用')
+  })
+})
+
+describe('界面统计 · 1D pattern（二值色带）', () => {
+  // 内联一份 1D 二值数据：验证 1D 色带与 margin 降级走同一条链路
+  const csv = [
+    '# kind: 1d',
+    '# x_label: VDD',
+    '# x_unit: V',
+    '# value_label: BIST',
+    '# spec: min=1,max=1',
+    'x,site,value',
+    '0.60,1,0',
+    '0.65,1,1',
+    '0.70,1,1',
+    '0.75,1,0',
+    '0.80,1,1',
+    '0.85,1,0'
+  ].join('\n')
+  const { dataset, report } = parseShmooCsv(csv, { fileName: 'pattern-1d.csv' })
+  const data = dataset as ShmooDataset
+  const html = renderLoaded(data, report)
+
+  it('按 1D 色带渲染，且不出现 NaN / undefined', () => {
+    expect(html).toContain('1D SHMOO')
+    expect(html).toContain('二值色带')
+    expect(html).not.toContain('NaN')
+    expect(html).not.toContain('undefined')
+  })
+
+  it('margin 同样显示“不适用”', () => {
+    expect(html).toContain('不适用')
   })
 })
 
