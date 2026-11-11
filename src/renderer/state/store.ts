@@ -5,6 +5,9 @@ import { parseCsvInWorker } from '../lib/parseCsv'
 /** 默认 spec：未导入数据时使用；导入后会由 CSV 元数据覆盖（D1：全局共用一份） */
 export const DEFAULT_SPEC: SpecLimit = { mode: 'min', min: undefined, max: undefined }
 
+/** 2D 图表配色模式：二值（pass/fail）或热力（连续测量值） */
+export type ColorMode = 'binary' | 'heat'
+
 interface AppState {
   /** 当前数据集；未导入或导入失败时为 null */
   dataset: ShmooDataset | null
@@ -12,6 +15,8 @@ interface AppState {
   activeSiteId: string | null
   /** 全局共用 spec（D1），所有 site 同步 */
   spec: SpecLimit
+  /** 2D 图表配色模式：二值 / 热力（阶段 ③） */
+  colorMode: ColorMode
   /** 最近读入的文件名，用于左栏与状态栏展示 */
   fileName: string | null
   /** 最近一次导入报告（点数、跳过行、缺失比例、解析耗时、问题列表） */
@@ -31,6 +36,7 @@ interface AppState {
   loadAppInfo: () => Promise<void>
   setActiveSite: (siteId: string) => void
   setSpec: (spec: SpecLimit) => void
+  setColorMode: (mode: ColorMode) => void
   setDataset: (dataset: ShmooDataset | null) => void
 }
 
@@ -38,6 +44,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   dataset: null,
   activeSiteId: null,
   spec: DEFAULT_SPEC,
+  colorMode: 'binary',
   fileName: null,
   report: null,
   isParsing: false,
@@ -107,6 +114,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setActiveSite: (siteId) => set({ activeSiteId: siteId }),
   setSpec: (spec) => set({ spec }),
+  setColorMode: (mode) => set({ colorMode: mode }),
   setDataset: (dataset) =>
     set({
       dataset,

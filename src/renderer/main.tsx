@@ -13,3 +13,9 @@ ReactDOM.createRoot(container).render(
     <App />
   </React.StrictMode>
 )
+
+// 开发模式下的演示数据入口（?demo=1）。生产构建时该分支被静态剔除，
+// 对应的 dev/demo.ts 与样例 CSV 都不会进入产物。
+if (import.meta.env.DEV) {
+  void import('./dev/demo').then((module) => module.maybeLoadDemo())
+}

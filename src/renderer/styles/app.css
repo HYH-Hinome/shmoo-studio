@@ -401,6 +401,205 @@ select {
   white-space: nowrap;
 }
 
+/* ============================================================
+   2D 图表（阶段 ③）
+   ============================================================ */
+
+/* 有图表时画布区不再居中卡片，改为铺满。
+   用复合选择器提高优先级：.stage__canvas 的 display:grid / place-items:center 定义在后面，
+   单类选择器同优先级会被它覆盖，导致图表被压缩到内容宽度并居中。
+   place-items 必须显式复位：justify-items 会被子元素继承，
+   子级又是 grid 容器时会让图表收缩成内容宽度。 */
+.stage__canvas.stage__canvas--chart {
+  display: block;
+  place-items: normal;
+}
+
+.stage__chartview {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: var(--space-2);
+  width: 100%;
+  height: 100%;
+  padding: var(--space-3) var(--space-4);
+}
+
+/* 图表标题行：左侧标题/轴说明，右侧关键读数 */
+.chart-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+.chart-head__main {
+  min-width: 0;
+}
+
+.chart-head__eyebrow {
+  margin: 0 0 2px;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.18em;
+  color: var(--color-text-disabled);
+}
+
+.chart-head__title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chart-head__axes {
+  margin: 2px 0 0;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chart-head__facts {
+  display: flex;
+  gap: var(--space-5);
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.chart-head__facts div {
+  min-width: 0;
+}
+
+.chart-head__facts dt {
+  font-size: var(--text-2xs);
+  letter-spacing: 0.06em;
+  color: var(--color-text-disabled);
+}
+
+.chart-head__facts dd {
+  margin: 2px 0 0;
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+/* 画布容器：三层 canvas 完全重叠，尺寸由容器决定 */
+.shmoo-chart {
+  position: relative;
+  min-height: 0;
+  border: 1px solid var(--color-line-subtle);
+  border-radius: var(--radius-md);
+  background: #070a0f;
+  overflow: hidden;
+}
+
+.shmoo-chart__canvas {
+  position: absolute;
+  inset: 0;
+  /* canvas 是替换元素：只写 inset 时 width/height 会退回“后备像素尺寸”，
+     导致画布被放大成 2 倍并裁切。必须显式铺满容器。 */
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* 只有最上层接收指针事件，十字线光标提示“可读取数值” */
+.shmoo-chart__canvas--interaction {
+  cursor: crosshair;
+}
+
+/* hover 读数浮层：位置由 JS 计算（吸附到格子中心），这里只管外观与淡入淡出 */
+.chart-tip {
+  position: absolute;
+  z-index: 2;
+  width: 178px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-sm);
+  background: rgba(8, 12, 18, 0.96);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out);
+  pointer-events: none;
+}
+
+.chart-tip.is-visible {
+  opacity: 1;
+}
+
+.chart-tip__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: 6px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--color-line-subtle);
+}
+
+.chart-tip__site {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+}
+
+.chart-tip__state {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.08em;
+}
+
+.chart-tip__state--pass {
+  color: var(--color-pass);
+}
+
+.chart-tip__state--fail {
+  color: var(--color-fail);
+}
+
+.chart-tip__state--unknown {
+  color: var(--color-text-disabled);
+}
+
+.chart-tip dl {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+}
+
+.chart-tip dl > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.chart-tip dt {
+  font-size: var(--text-2xs);
+  color: var(--color-text-disabled);
+}
+
+.chart-tip dd {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--color-text-primary);
+}
+
+.chart-tip dd i {
+  font-style: normal;
+  font-size: var(--text-2xs);
+  color: var(--color-text-muted);
+}
+
 /* 分段控件（阶段 ③/④ 会接真实的 2D/1D 切换） */
 .segmented {
   display: inline-flex;

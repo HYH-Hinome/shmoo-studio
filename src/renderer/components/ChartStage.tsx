@@ -1,21 +1,26 @@
 import { formatCount } from '../lib/format'
 import { useAppStore } from '../state/store'
+import { Shmoo2DChart } from './Shmoo2DChart'
 
 /**
  * 中央图表区。
- * 本阶段（阶段 ②）只验证“数据链路”：解析完成后把真实数据集信息展示出来，
- * Canvas 的真实 2D / 1D 渲染在阶段 ③ / ④ 接入，
- * 因此这里仍然是占位卡片，但卡片里的数字全部来自真实解析结果，不是假数据。
+ *  - 2D 数据集：阶段 ③ 起接入真实 Canvas 渲染（三层画布，见 Shmoo2DChart）；
+ *  - 1D 数据集：仍为信息卡占位，折线图在阶段 ④ 接入；
+ *  - 未导入：空态引导。
  */
 export function ChartStage(): JSX.Element {
   const openCsv = useAppStore((s) => s.openCsv)
   const dataset = useAppStore((s) => s.dataset)
   const activeSiteId = useAppStore((s) => s.activeSiteId)
   const report = useAppStore((s) => s.report)
+  const colorMode = useAppStore((s) => s.colorMode)
+  const setColorMode = useAppStore((s) => s.setColorMode)
 
   const activeSite = dataset?.sites.find((site) => site.siteId === activeSiteId) ?? null
   const nx = dataset?.xAxis.values.length ?? 0
   const ny = dataset?.yAxis?.values.length ?? (dataset ? 1 : 0)
+  // 2D 数据集必须同时具备 y 轴与当前站点，才进入真实渲染分支
+  const render2D = dataset?.kind === '2d' && !!dataset.yAxis && !!activeSite
 
   // spec 描述文案：未配置时明确提示，而不是显示一个空白的输入框
   const specText = (() => {
@@ -53,6 +58,27 @@ export function ChartStage(): JSX.Element {
             1D Shmoo
           </button>
         </div>
+
+        {/* 配色模式仅对 2D 有意义；1D 折线图在阶段 ④ 接入后再决定是否复用 */}
+        <div className="segmented" role="group" aria-label="配色模式">
+          <button
+            type="button"
+            className={colorMode === 'binary' ? 'is-active' : undefined}
+            disabled={!render2D}
+            onClick={() => setColorMode('binary')}
+          >
+            二值
+          </button>
+          <button
+            type="button"
+            className={colorMode === 'heat' ? 'is-active' : undefined}
+            disabled={!render2D}
+            onClick={() => setColorMode('heat')}
+          >
+            热力
+          </button>
+        </div>
+
         <div className="stage__spacer" />
         {activeSite ? <span className="stage__badge">{activeSite.siteLabel}</span> : null}
         <span className="stage__badge">
@@ -65,14 +91,65 @@ export function ChartStage(): JSX.Element {
         ) : null}
       </div>
 
-      <div className="stage__canvas">
+      <div className={`stage__canvas${render2D ? ' stage__canvas--chart' : ''}`}>
         <div className="stage__scan" aria-hidden="true" />
         <span className="stage__corner stage__corner--tl" aria-hidden="true" />
         <span className="stage__corner stage__corner--tr" aria-hidden="true" />
         <span className="stage__corner stage__corner--bl" aria-hidden="true" />
         <span className="stage__corner stage__corner--br" aria-hidden="true" />
 
-        {dataset ? (
+        {dataset && render2D && activeSite && dataset.yAxis ? (
+          <div className="stage__chartview">
+            <header className="chart-head">
+              <div className="chart-head__main">
+                <p className="chart-head__eyebrow">
+                  2D SHMOO · {nx} × {ny}
+                </p>
+                <h1 className="chart-head__title">{dataset.title}</h1>
+                <p className="chart-head__axes">
+                  {dataset.xAxis.label}
+                  {dataset.xAxis.unit ? ` (${dataset.xAxis.unit})` : ''}
+                  {' × '}
+                  {dataset.yAxis.label}
+                  {dataset.yAxis.unit ? ` (${dataset.yAxis.unit})` : ''}
+                  {' · 值 '}
+                  {dataset.valueLabel}
+                  {dataset.valueUnit ? ` (${dataset.valueUnit})` : ''}
+                </p>
+              </div>
+              <dl className="chart-head__facts">
+                <div>
+                  <dt>当前站点</dt>
+                  <dd className="mono">{activeSite.siteLabel}</dd>
+                </div>
+                <div>
+                  <dt>有效点</dt>
+                  <dd className="mono">
+                    {formatCount(activeSite.knownCount)} / {formatCount(nx * ny)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>规格</dt>
+                  <dd className="mono">{specText}</dd>
+                </div>
+                <div>
+                  <dt>判定来源</dt>
+                  <dd className="mono">
+                    {dataset.passSource === 'file' ? 'CSV pass 列' : 'spec 推导'}
+                  </dd>
+                </div>
+              </dl>
+            </header>
+
+            <Shmoo2DChart
+              dataset={dataset}
+              site={activeSite}
+              xAxis={dataset.xAxis}
+              yAxis={dataset.yAxis}
+              mode={colorMode}
+            />
+          </div>
+        ) : dataset ? (
           <div className="stage__info">
             <p className="stage__eyebrow">
               {dataset.kind === '2d' ? '2D SHMOO' : '1D SHMOO'} · {nx} × {ny}
@@ -110,9 +187,7 @@ export function ChartStage(): JSX.Element {
               </div>
             </dl>
 
-            <p className="stage__hint">
-              Canvas 渲染将在阶段 ③（2D）/ 阶段 ④（1D）接入，本阶段只验证数据链路。
-            </p>
+            <p className="stage__hint">1D 折线图将在阶段 ④ 接入，本阶段只展示数据链路。</p>
           </div>
         ) : (
           <div className="stage__empty">

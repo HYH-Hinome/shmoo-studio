@@ -33,6 +33,8 @@ desktop.ini
 *.rar
 *.pdf
 screenshots/
+# 阶段验收截图（本地保留，不进仓库）
+docs/shots/
 test-results/
 playwright-report/
 samples/large/
