@@ -125,6 +125,32 @@ describe('binaryMarginColor（A 版：margin 明度调制）', () => {
   })
 })
 
+describe('binaryMarginColor（A′ 版：A 的明度调制 + 正红 FAIL）', () => {
+  it('PASS 与 A 完全一致，只有 FAIL 换成正红 #c0453e', () => {
+    expect(BINARY_PALETTES.A2.passAnchor).toBe(BINARY_PALETTES.A.passAnchor)
+    expect(BINARY_PALETTES.A2.passShadow).toBe(BINARY_PALETTES.A.passShadow)
+    expect(BINARY_PALETTES.A2.failAnchor).toBe('#c0453e')
+    expect(binaryMarginColor('A2', CELL_FAIL, 1)).toBe('#c0453e')
+    expect(binaryMarginColor('A2', CELL_PASS, 1)).toBe('#26968a')
+  })
+
+  it('FAIL 暗端为同色相压暗，暗端仍偏红（不偏灰/偏黄）', () => {
+    const dark = binaryMarginColor('A2', CELL_FAIL, 0)
+    const n = Number.parseInt(dark.slice(1), 16)
+    const r = (n >> 16) & 0xff
+    const g = (n >> 8) & 0xff
+    const b = n & 0xff
+    expect(r).toBeGreaterThan(g)
+    expect(r).toBeGreaterThan(b)
+    expect(g - b).toBeLessThan(10)
+  })
+
+  it('A′ 的热力色带不变，暖端仍是琥珀 #d99a2b', () => {
+    expect(heatGradientStops(5, 'A2')).toEqual(heatGradientStops(5, 'A'))
+    expect(heatGradientStops(5, 'A2')[4]).toBe('#d99a2b')
+  })
+})
+
 describe('binaryMarginColor（B 版：降饱和 + 平坦）', () => {
   it('m 不参与计算，任意 m 得到同一色值', () => {
     expect(binaryMarginColor('B', CELL_PASS, 0)).toBe('#6b8a78')

@@ -262,8 +262,15 @@ function drawAxes(
     const rect = cellRect(geometry, i, 0)
     return edge + rect.w / 2
   })
-  const xIndices = pickTickIndices(xCenters, 56)
   const xDecimals = tickDecimals(xAxis.values)
+  // 抽稀依据：先量出最宽的一条刻度文字，再要求相邻标签中心距 >= 文字宽 + 16px 呼吸间距。
+  // 这样点数增加（格子变窄）时会自动“隔几个标一个”，而不是把标签挤成一团；
+  // 最小 36px 是为了避免 1–2 位数字时标签过密。
+  const xLabelMaxWidth = xAxis.values.reduce(
+    (max, value) => Math.max(max, ctx.measureText(value.toFixed(xDecimals)).width),
+    0
+  )
+  const xIndices = pickTickIndices(xCenters, Math.max(36, xLabelMaxWidth + 16))
 
   ctx.strokeStyle = CHART_STRUCTURE.axisLine
   ctx.lineWidth = 1
@@ -273,14 +280,26 @@ function drawAxes(
   ctx.stroke()
 
   ctx.fillStyle = CHART_STRUCTURE.tickText
-  ctx.textAlign = 'center'
   for (const i of xIndices) {
     const x = snap(xCenters[i], dpr)
     ctx.beginPath()
     ctx.moveTo(x + 0.5 / dpr, plot.y + plot.h)
     ctx.lineTo(x + 0.5 / dpr, plot.y + plot.h + 4)
     ctx.stroke()
-    ctx.fillText(xAxis.values[i].toFixed(xDecimals), x, plot.y + plot.h + 14)
+    const text = xAxis.values[i].toFixed(xDecimals)
+    // 首尾标签贴边对齐：宁可丢一点“居中对齐”的美观，也不让文字被画布裁掉或压到 y 轴标签上。
+    // （100×100 这类格子只有几像素宽时，首末标签居中会各有一半跑出数据区）
+    const half = ctx.measureText(text).width / 2
+    if (x - half < plot.x) {
+      ctx.textAlign = 'left'
+      ctx.fillText(text, plot.x, plot.y + plot.h + 14)
+    } else if (x + half > plot.x + plot.w) {
+      ctx.textAlign = 'right'
+      ctx.fillText(text, plot.x + plot.w, plot.y + plot.h + 14)
+    } else {
+      ctx.textAlign = 'center'
+      ctx.fillText(text, x, plot.y + plot.h + 14)
+    }
   }
 
   // x 轴标题（含单位），放在刻度下方
@@ -304,7 +323,29 @@ function drawAxes(
     yOrder.map((item) => item.y),
     28
   )
-  const yDecimals = tickDecimals(yAxis.values)
+
+  // y 标签防裁剪：标签右对齐画在 plot.x - 8 处，可用宽度约 plot.x - 10。
+  // 若最宽标签超出（例如 1e6 级大电流、或很长的电压值），先逐步减少小数位，
+  // 减到 0 位仍放不下时换小一号字体。绝不截断数值，也不让文字画到画布外。
+  // 抽稀只决定“标几个”，这里解决“单个标签是否放得下”，两件事互相独立。
+  const yLabelSpace = plot.x - 10
+  let yDecimals = tickDecimals(yAxis.values)
+  let yLabels = yAxis.values.map((value) => value.toFixed(yDecimals))
+  let yLabelMaxWidth = yLabels.reduce(
+    (max, text) => Math.max(max, ctx.measureText(text).width),
+    0
+  )
+  while (yDecimals > 0 && yLabelMaxWidth > yLabelSpace) {
+    yDecimals--
+    yLabels = yAxis.values.map((value) => value.toFixed(yDecimals))
+    yLabelMaxWidth = yLabels.reduce(
+      (max, text) => Math.max(max, ctx.measureText(text).width),
+      0
+    )
+  }
+  if (yLabelMaxWidth > yLabelSpace) {
+    ctx.font = FONT_MONO_SMALL
+  }
 
   ctx.beginPath()
   ctx.moveTo(snap(plot.x, dpr) + 0.5 / dpr, plot.y)
@@ -320,10 +361,11 @@ function drawAxes(
     ctx.moveTo(plot.x - 4, py + 0.5 / dpr)
     ctx.lineTo(plot.x, py + 0.5 / dpr)
     ctx.stroke()
-    ctx.fillText(yAxis.values[iy].toFixed(yDecimals), plot.x - 8, py)
+    ctx.fillText(yLabels[iy], plot.x - 8, py)
   }
 
   // y 轴标题：旋转 -90°，放在左侧留白中间
+  ctx.font = FONT_MONO
   const yTitle = yAxis.unit ? `${yAxis.label} (${yAxis.unit})` : yAxis.label
   ctx.save()
   ctx.translate(14, plot.y + plot.h / 2)

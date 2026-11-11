@@ -14,8 +14,8 @@ import { evaluatePoint } from '@shared/spec/evaluate'
  *    B 版对应一条整体降饱和的色带，避免同一界面里出现“高饱和色带 + 灰调色块”的割裂。
  */
 
-/** 配色版本：A = 同源色板 + margin 明度调制，B = 降饱和 + 细描边 */
-export type PaletteVariant = 'A' | 'B'
+/** 配色版本：A = 同源色板 + margin 明度调制，B = 降饱和 + 细描边，A2 = A 的 FAIL 改正红 */
+export type PaletteVariant = 'A' | 'B' | 'A2'
 
 /** 二值模式配色定义 */
 export interface BinaryPalette {
@@ -69,9 +69,27 @@ const PALETTE_B: BinaryPalette = {
   cellOutline: 'rgba(2, 4, 7, 0.88)'
 }
 
+/**
+ * A′ 版二值配色：沿用 A 的 PASS 青绿与 margin 明度调制，只把 FAIL 色相从琥珀改成偏正的红。
+ *
+ * 为什么：琥珀承担“失效”语义时容易和热力图暖端（数值高）混淆；
+ * 正红 #c0453e 更接近工程习惯里的“不良”，同时压住了饱和度（不是荧光红/橙红，也不是枣红）。
+ * 暗端仍由同色相压暗得到，保证暗格不发灰。
+ */
+const PALETTE_A2: BinaryPalette = {
+  passAnchor: '#26968a',
+  passShadow: '#0c1e1e',
+  failAnchor: '#c0453e',
+  failShadow: '#1f0c0b',
+  unknownBase: '#0d1520',
+  flat: false,
+  cellOutline: null
+}
+
 export const BINARY_PALETTES: Record<PaletteVariant, BinaryPalette> = {
   A: PALETTE_A,
-  B: PALETTE_B
+  B: PALETTE_B,
+  A2: PALETTE_A2
 }
 
 /** 明度调制的最暗系数：0 表示完全贴合暗端，1 表示完全贴合锚点 */
@@ -81,7 +99,14 @@ const TINT_SPAN = 0.7
 /** 归一化 |margin| 时使用的分位数（避免极端值把整片区域压到最暗） */
 const MARGIN_PERCENTILE = 0.9
 
-/** 热力色带停靠点（t = 0 表示该站点最小值，t = 1 表示最大值）—— A 版 */
+/**
+ * 热力色带停靠点（t = 0 表示该站点最小值，t = 1 表示最大值）—— A / A′ 版共用。
+ *
+ * 设计意图（请勿“顺手统一”）：热力图的颜色编码的是**数值高低**，不是好坏，
+ * 所以暖端保持琥珀 #d99a2b，不随二值模式的 FAIL 一起变红。
+ * 一旦暖端也变红，用户会把“数值高”直接读成“失效”，与二值模式的红色语义冲突。
+ * 二值模式的 FAIL 只在 PALETTE_A2.failAnchor 中定义，两套色板互不影响。
+ */
 export const HEAT_STOPS: ReadonlyArray<{ t: number; color: string }> = [
   { t: 0, color: '#102b3f' },
   { t: 0.34, color: '#1c6478' },

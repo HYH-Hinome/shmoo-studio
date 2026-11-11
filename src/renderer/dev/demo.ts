@@ -13,8 +13,8 @@ import { useAppStore } from '../state/store'
  *
  *   ?demo=1                  载入 samples/sample-2d-mcu.csv（二值模式）
  *   ?demo=1&mode=heat        以热力模式打开
- *   ?demo=1&palette=a|b      选择二值配色版本（A 同源明度调制 / B 降饱和细描边）
- *   ?demo=1&hover=21,9       载入后在该格子上触发一次 pointermove（截图用）
+ *   ?demo=1&palette=a|b|a2  选择二值配色版本（A 同源明度调制 / B 降饱和细描边 / A′ 正红 FAIL）
+ *   ?demo=1&hover=21,9       载入后在该格子上触发一次 pointermove（截图用，越界会被忽略）
  *   ?demo=1&bench=1          额外跑 1920×1080 @ DPR2 的静态层压测，结果写入 window.__shmooBench
  *
  * 生产构建时 main.tsx 中的 `import.meta.env.DEV` 分支会被静态剔除，
@@ -80,6 +80,14 @@ async function applyHover(dataset: ShmooDataset, spec: string): Promise<void> {
   const [ix, iy] = spec.split(',').map((part) => Number(part))
   if (!Number.isInteger(ix) || !Number.isInteger(iy)) {
     console.warn('[demo] hover 参数应为 "xIndex,yIndex"', spec)
+    return
+  }
+  // 行列数由数据决定（30×30 只是样例），这里按真实轴长做越界保护，
+  // 避免换数据集后 hover 坐标越界、cellCenter 取到 edges 之外的 NaN。
+  const nx = dataset.xAxis.values.length
+  const ny = dataset.yAxis?.values.length ?? 0
+  if (ix < 0 || ix >= nx || iy < 0 || iy >= ny) {
+    console.warn(`[demo] hover 索引越界：(${ix}, ${iy})，当前网格 ${nx}×${ny}`)
     return
   }
 
@@ -150,8 +158,8 @@ function runBench(dataset: ShmooDataset): void {
     valueLabel: dataset.valueLabel,
     valueUnit: dataset.valueUnit,
     mode: 'binary' as const,
-    // 压测取 A 版：A 版逐格计算 margin 明度，是两版里更重的那一版
-    variant: 'A' as const,
+    // 压测当前选中的配色版本（A2 与 A 同一条逐格混色路径，B 为平坦填充）
+    variant: useAppStore.getState().palette,
     tint: computeMarginTints(site, dataset.spec),
     motion: { enabled: false, delaySpan: 0, cellDuration: 0, elapsed: 0 }
   }
@@ -196,9 +204,9 @@ export async function maybeLoadDemo(): Promise<void> {
     useAppStore.setState({ colorMode: mode })
   }
 
-  // 二值配色版本：?palette=a / ?palette=b（大小写不敏感）
+  // 二值配色版本：?palette=a / ?palette=b / ?palette=a2（大小写不敏感）
   const palette = params.get('palette')?.toUpperCase()
-  if (palette === 'A' || palette === 'B') {
+  if (palette === 'A' || palette === 'B' || palette === 'A2') {
     useAppStore.setState({ palette })
   }
 
