@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  BINARY_PALETTES,
+  BINARY_PALETTE,
   HEAT_STOPS,
-  HEAT_STOPS_MUTED,
   binaryMarginColor,
   binarySwatchStops,
   computeMarginTints,
@@ -15,10 +14,10 @@ import type { SiteGrid } from '@shared/types/shmoo'
 import { CELL_FAIL, CELL_PASS, CELL_UNKNOWN } from '@shared/types/shmoo'
 
 /**
- * 图表配色测试（阶段 ③ / ③b）：
+ * 图表配色测试（阶段 ③c 定稿：A′ 单一色板）：
  *  - 热力色带端点/夹紧/等值退化；
  *  - valueToT 对无范围、全等值、越界值的处理；
- *  - 二值 A 版的 margin 明度调制公式与 B 版的平坦填充；
+ *  - 二值 PASS 青绿 / FAIL 正红 + margin 明度调制；
  *  - margin 归一化（p90 参考值、缺失格不参与）。
  */
 
@@ -74,27 +73,21 @@ describe('heatGradientStops', () => {
     const stops = heatGradientStops(5)
     expect(stops).toHaveLength(5)
     expect(stops[0]).toBe('#102b3f')
+    // 热力暖端保持琥珀：这是“数值高低”的编码，不能跟着 FAIL 变红
     expect(stops[4]).toBe('#d99a2b')
-  })
-
-  it('B 版使用降饱和色带，端点与 A 版不同', () => {
-    expect(heatGradientStops(5, 'B')[0]).toBe(HEAT_STOPS_MUTED[0].color)
-    expect(heatGradientStops(5, 'B')[4]).toBe(HEAT_STOPS_MUTED[HEAT_STOPS_MUTED.length - 1].color)
-    expect(heatGradientStops(5, 'B')[4]).not.toBe('#d99a2b')
   })
 })
 
-describe('binaryMarginColor（A 版：margin 明度调制）', () => {
+describe('binaryMarginColor（A′：margin 明度调制 + 正红 FAIL）', () => {
   it('m = 0 时为暗端（锚点混入 30%），m = 1 时为完整锚点', () => {
-    const palette = BINARY_PALETTES.A
-    expect(binaryMarginColor('A', CELL_PASS, 0)).toBe(
-      mixColor(palette.passShadow, palette.passAnchor, 0.3)
+    expect(binaryMarginColor(CELL_PASS, 0)).toBe(
+      mixColor(BINARY_PALETTE.passShadow, BINARY_PALETTE.passAnchor, 0.3)
     )
-    expect(binaryMarginColor('A', CELL_PASS, 1)).toBe(palette.passAnchor)
-    expect(binaryMarginColor('A', CELL_FAIL, 0)).toBe(
-      mixColor(palette.failShadow, palette.failAnchor, 0.3)
+    expect(binaryMarginColor(CELL_PASS, 1)).toBe(BINARY_PALETTE.passAnchor)
+    expect(binaryMarginColor(CELL_FAIL, 0)).toBe(
+      mixColor(BINARY_PALETTE.failShadow, BINARY_PALETTE.failAnchor, 0.3)
     )
-    expect(binaryMarginColor('A', CELL_FAIL, 1)).toBe(palette.failAnchor)
+    expect(binaryMarginColor(CELL_FAIL, 1)).toBe(BINARY_PALETTE.failAnchor)
   })
 
   it('明度随 |margin| 单调递增（同色相内越远越亮）', () => {
@@ -102,40 +95,19 @@ describe('binaryMarginColor（A 版：margin 明度调制）', () => {
       const n = Number.parseInt(hex.slice(1), 16)
       return ((n >> 16) & 0xff) * 0.2126 + ((n >> 8) & 0xff) * 0.7152 + (n & 0xff) * 0.0722
     }
-    const samples = [0, 0.25, 0.5, 0.75, 1].map((m) => luma(binaryMarginColor('A', CELL_PASS, m)))
+    const samples = [0, 0.25, 0.5, 0.75, 1].map((m) => luma(binaryMarginColor(CELL_PASS, m)))
     for (let i = 1; i < samples.length; i++) {
       expect(samples[i]).toBeGreaterThan(samples[i - 1])
     }
   })
 
-  it('PASS 与 FAIL 色相不同（分别取色带的青绿与琥珀）', () => {
-    expect(binaryMarginColor('A', CELL_PASS, 1)).toBe('#26968a')
-    expect(binaryMarginColor('A', CELL_FAIL, 1)).toBe('#d99a2b')
+  it('PASS 青绿 / FAIL 正红，端点色值固定', () => {
+    expect(binaryMarginColor(CELL_PASS, 1)).toBe('#26968a')
+    expect(binaryMarginColor(CELL_FAIL, 1)).toBe('#c0453e')
   })
 
-  it('m 越界或 NaN 时夹紧，不产生非法颜色', () => {
-    expect(binaryMarginColor('A', CELL_PASS, -3)).toBe(binaryMarginColor('A', CELL_PASS, 0))
-    expect(binaryMarginColor('A', CELL_PASS, 9)).toBe(binaryMarginColor('A', CELL_PASS, 1))
-    expect(binaryMarginColor('A', CELL_PASS, Number.NaN)).toBe(binaryMarginColor('A', CELL_PASS, 0))
-  })
-
-  it('未知格恒为 unknownBase，与 m 无关', () => {
-    expect(binaryMarginColor('A', CELL_UNKNOWN, 0)).toBe(BINARY_PALETTES.A.unknownBase)
-    expect(binaryMarginColor('B', CELL_UNKNOWN, 1)).toBe(BINARY_PALETTES.B.unknownBase)
-  })
-})
-
-describe('binaryMarginColor（A′ 版：A 的明度调制 + 正红 FAIL）', () => {
-  it('PASS 与 A 完全一致，只有 FAIL 换成正红 #c0453e', () => {
-    expect(BINARY_PALETTES.A2.passAnchor).toBe(BINARY_PALETTES.A.passAnchor)
-    expect(BINARY_PALETTES.A2.passShadow).toBe(BINARY_PALETTES.A.passShadow)
-    expect(BINARY_PALETTES.A2.failAnchor).toBe('#c0453e')
-    expect(binaryMarginColor('A2', CELL_FAIL, 1)).toBe('#c0453e')
-    expect(binaryMarginColor('A2', CELL_PASS, 1)).toBe('#26968a')
-  })
-
-  it('FAIL 暗端为同色相压暗，暗端仍偏红（不偏灰/偏黄）', () => {
-    const dark = binaryMarginColor('A2', CELL_FAIL, 0)
+  it('FAIL 暗端为同色相压暗，仍偏红（不偏灰/偏黄）', () => {
+    const dark = binaryMarginColor(CELL_FAIL, 0)
     const n = Number.parseInt(dark.slice(1), 16)
     const r = (n >> 16) & 0xff
     const g = (n >> 8) & 0xff
@@ -145,41 +117,24 @@ describe('binaryMarginColor（A′ 版：A 的明度调制 + 正红 FAIL）', ()
     expect(g - b).toBeLessThan(10)
   })
 
-  it('A′ 的热力色带不变，暖端仍是琥珀 #d99a2b', () => {
-    expect(heatGradientStops(5, 'A2')).toEqual(heatGradientStops(5, 'A'))
-    expect(heatGradientStops(5, 'A2')[4]).toBe('#d99a2b')
-  })
-})
-
-describe('binaryMarginColor（B 版：降饱和 + 平坦）', () => {
-  it('m 不参与计算，任意 m 得到同一色值', () => {
-    expect(binaryMarginColor('B', CELL_PASS, 0)).toBe('#6b8a78')
-    expect(binaryMarginColor('B', CELL_PASS, 1)).toBe('#6b8a78')
-    expect(binaryMarginColor('B', CELL_FAIL, 0.4)).toBe('#a06a5e')
+  it('m 越界或 NaN 时夹紧，不产生非法颜色', () => {
+    expect(binaryMarginColor(CELL_PASS, -3)).toBe(binaryMarginColor(CELL_PASS, 0))
+    expect(binaryMarginColor(CELL_PASS, 9)).toBe(binaryMarginColor(CELL_PASS, 1))
+    expect(binaryMarginColor(CELL_PASS, Number.NaN)).toBe(binaryMarginColor(CELL_PASS, 0))
   })
 
-  it('B 版饱和度明显低于旧版纯绿 / 纯红', () => {
-    const saturation = (hex: string): number => {
-      const n = Number.parseInt(hex.slice(1), 16)
-      const r = ((n >> 16) & 0xff) / 255
-      const g = ((n >> 8) & 0xff) / 255
-      const b = (n & 0xff) / 255
-      const max = Math.max(r, g, b)
-      const min = Math.min(r, g, b)
-      return max === 0 ? 0 : (max - min) / max
-    }
-    // 旧版：#2fbf8f 饱和度约 0.75，#e2555a 约 0.60
-    expect(saturation(BINARY_PALETTES.B.passAnchor)).toBeLessThan(0.25)
-    expect(saturation(BINARY_PALETTES.B.failAnchor)).toBeLessThan(0.45)
+  it('未知格恒为 unknownBase，与 m 无关', () => {
+    expect(binaryMarginColor(CELL_UNKNOWN, 0)).toBe(BINARY_PALETTE.unknownBase)
+    expect(binaryMarginColor(CELL_UNKNOWN, 1)).toBe(BINARY_PALETTE.unknownBase)
   })
 })
 
 describe('binarySwatchStops', () => {
-  it('A 版色卡从暗端渐变到锚点，且首尾与主图同源', () => {
-    const stops = binarySwatchStops('A', CELL_PASS, 4)
+  it('色卡从暗端渐变到锚点，且首尾与主图同源', () => {
+    const stops = binarySwatchStops(CELL_PASS, 4)
     expect(stops).toHaveLength(4)
-    expect(stops[0]).toBe(binaryMarginColor('A', CELL_PASS, 0))
-    expect(stops[3]).toBe(binaryMarginColor('A', CELL_PASS, 1))
+    expect(stops[0]).toBe(binaryMarginColor(CELL_PASS, 0))
+    expect(stops[3]).toBe(binaryMarginColor(CELL_PASS, 1))
   })
 })
 

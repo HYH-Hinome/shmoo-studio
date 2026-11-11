@@ -1,19 +1,12 @@
 import { create } from 'zustand'
 import type { ImportReport, ShmooDataset, SpecLimit } from '@shared/types/shmoo'
 import { parseCsvInWorker } from '../lib/parseCsv'
-import type { PaletteVariant } from '../chart/colors'
 
 /** 默认 spec：未导入数据时使用；导入后会由 CSV 元数据覆盖（D1：全局共用一份） */
 export const DEFAULT_SPEC: SpecLimit = { mode: 'min', min: undefined, max: undefined }
 
 /** 2D 图表配色模式：二值（pass/fail）或热力（连续测量值） */
 export type ColorMode = 'binary' | 'heat'
-
-/**
- * 二值配色版本（阶段 ③b）：A = 同源色板 + margin 明度调制，B = 降饱和 + 细描边。
- * 两版都保留在代码里供对比，默认 A，等用户确认后再定稿。
- */
-export type { PaletteVariant }
 
 interface AppState {
   /** 当前数据集；未导入或导入失败时为 null */
@@ -24,8 +17,6 @@ interface AppState {
   spec: SpecLimit
   /** 2D 图表配色模式：二值 / 热力（阶段 ③） */
   colorMode: ColorMode
-  /** 二值配色版本（阶段 ③b）：A / B */
-  palette: PaletteVariant
   /** 最近读入的文件名，用于左栏与状态栏展示 */
   fileName: string | null
   /** 最近一次导入报告（点数、跳过行、缺失比例、解析耗时、问题列表） */
@@ -46,7 +37,6 @@ interface AppState {
   setActiveSite: (siteId: string) => void
   setSpec: (spec: SpecLimit) => void
   setColorMode: (mode: ColorMode) => void
-  setPalette: (palette: PaletteVariant) => void
   setDataset: (dataset: ShmooDataset | null) => void
 }
 
@@ -55,7 +45,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeSiteId: null,
   spec: DEFAULT_SPEC,
   colorMode: 'binary',
-  palette: 'A',
   fileName: null,
   report: null,
   isParsing: false,
@@ -126,7 +115,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   setActiveSite: (siteId) => set({ activeSiteId: siteId }),
   setSpec: (spec) => set({ spec }),
   setColorMode: (mode) => set({ colorMode: mode }),
-  setPalette: (palette) => set({ palette }),
   setDataset: (dataset) =>
     set({
       dataset,

@@ -13,7 +13,6 @@ import { useAppStore } from '../state/store'
  *
  *   ?demo=1                  载入 samples/sample-2d-mcu.csv（二值模式）
  *   ?demo=1&mode=heat        以热力模式打开
- *   ?demo=1&palette=a|b|a2  选择二值配色版本（A 同源明度调制 / B 降饱和细描边 / A′ 正红 FAIL）
  *   ?demo=1&hover=21,9       载入后在该格子上触发一次 pointermove（截图用，越界会被忽略）
  *   ?demo=1&bench=1          额外跑 1920×1080 @ DPR2 的静态层压测，结果写入 window.__shmooBench
  *
@@ -158,8 +157,6 @@ function runBench(dataset: ShmooDataset): void {
     valueLabel: dataset.valueLabel,
     valueUnit: dataset.valueUnit,
     mode: 'binary' as const,
-    // 压测当前选中的配色版本（A2 与 A 同一条逐格混色路径，B 为平坦填充）
-    variant: useAppStore.getState().palette,
     tint: computeMarginTints(site, dataset.spec),
     motion: { enabled: false, delaySpan: 0, cellDuration: 0, elapsed: 0 }
   }
@@ -204,11 +201,7 @@ export async function maybeLoadDemo(): Promise<void> {
     useAppStore.setState({ colorMode: mode })
   }
 
-  // 二值配色版本：?palette=a / ?palette=b / ?palette=a2（大小写不敏感）
-  const palette = params.get('palette')?.toUpperCase()
-  if (palette === 'A' || palette === 'B' || palette === 'A2') {
-    useAppStore.setState({ palette })
-  }
+  // 二值配色已在阶段 ③c 定稿为 A′（青绿 PASS / 正红 FAIL），不再提供版本切换参数
 
   // 等图表挂载后再做悬停/压测，避免在空态上操作
   await waitFor(() => document.querySelector<HTMLElement>('.shmoo-chart'))

@@ -5,19 +5,13 @@ import { evaluatePoint } from '@shared/spec/evaluate'
 /**
  * 图表配色（纯函数，无 DOM 依赖）。
  *
- * 视觉方向（阶段 ③ 定调，阶段 ③b 返工）：
+ * 视觉方向（阶段 ③ 定调，阶段 ③c 定稿为 A′）：
  *  - 深色仪器风：底色接近黑，色块本身承担全部视觉重量，不加渐变背景/发光；
- *  - 二值模式提供 A / B 两版配色，供用户选择，两版都提供热力图版本以核对风格协调性：
- *      A：同源色板 + margin 明度调制（色相取自热力色带，明度编码 |margin|）
- *      B：彻底降饱和 + 每格 1 设备像素深色描边（靠边界线而不是色块对比表达结构）
- *  - 热力模式用低饱和的冷→暖顺序色带（深钢蓝 → 青 → 绿 → 琥珀），不用彩虹/jet；
- *    B 版对应一条整体降饱和的色带，避免同一界面里出现“高饱和色带 + 灰调色块”的割裂。
+ *  - 二值模式：同源色板 + margin 明度调制（明度编码 |margin|，边界两侧同时压暗）；
+ *  - 热力模式：低饱和的冷→暖顺序色带（深钢蓝 → 青 → 绿 → 琥珀），不用彩虹/jet。
  */
 
-/** 配色版本：A = 同源色板 + margin 明度调制，B = 降饱和 + 细描边，A2 = A 的 FAIL 改正红 */
-export type PaletteVariant = 'A' | 'B' | 'A2'
-
-/** 二值模式配色定义 */
+/** 二值模式配色定义（定稿版 A′） */
 export interface BinaryPalette {
   /** PASS 色相锚点（远离 spec 时的最亮色） */
   passAnchor: string
@@ -29,67 +23,23 @@ export interface BinaryPalette {
   failShadow: string
   /** 缺失格底色；斜纹在其上绘制 */
   unknownBase: string
-  /** 是否使用平坦填充（true 时忽略 margin 明度调制） */
-  flat: boolean
-  /** 单元格描边色；null 表示不额外描边（沿用网格线） */
-  cellOutline: string | null
 }
 
 /**
- * A 版二值配色。
+ * 定稿二值配色 A′：PASS 青绿 + FAIL 正红，两者都做 margin 明度调制。
  *
- * 色相来源（与热力色带同源，不再使用独立的纯绿 / 纯红）：
- *  - PASS：热力色带冷段 #1c6478 与 #2fbf8f 之间偏青的一档 → #26968a；
- *  - FAIL：热力色带暖端 #d99a2b（琥珀），负责“警示”语义；
- *  - 两端暗色由“锚点混入画布底色”得到，保证暗端永远是同一族色相。
+ * 色相取舍：
+ *  - PASS #26968a：与热力色带冷段同源的青绿，远离“Excel 绿”；
+ *  - FAIL #c0453e：偏正的红（H≈2°），不枣红（明度太低）、不荧光（饱和度太高）、不橙红（H>15°）；
+ *    琥珀在工程语境里容易被读成“警示黄”，且会和热力暖端混淆，因此定稿改为正红；
+ *  - 两端暗色由同色相压暗得到（#0c1e1e / #1f0c0b），保证暗格仍能分辨红/青，不会发灰。
  */
-const PALETTE_A: BinaryPalette = {
-  passAnchor: '#26968a',
-  passShadow: '#0c1e1e',
-  failAnchor: '#d99a2b',
-  failShadow: '#1d1408',
-  unknownBase: '#0d1520',
-  flat: false,
-  cellOutline: null
-}
-
-/**
- * B 版二值配色：明显降饱和。
- *  - PASS：灰绿 #6b8a78（HSL 饱和度约 14%）；
- *  - FAIL：陶土红 #a06a5e（HSL 饱和度约 25%）；
- *  - 靠 1 设备像素深色描边切分格子，而不是靠高饱和对比。
- */
-const PALETTE_B: BinaryPalette = {
-  passAnchor: '#6b8a78',
-  passShadow: '#6b8a78',
-  failAnchor: '#a06a5e',
-  failShadow: '#a06a5e',
-  unknownBase: '#0d1520',
-  flat: true,
-  cellOutline: 'rgba(2, 4, 7, 0.88)'
-}
-
-/**
- * A′ 版二值配色：沿用 A 的 PASS 青绿与 margin 明度调制，只把 FAIL 色相从琥珀改成偏正的红。
- *
- * 为什么：琥珀承担“失效”语义时容易和热力图暖端（数值高）混淆；
- * 正红 #c0453e 更接近工程习惯里的“不良”，同时压住了饱和度（不是荧光红/橙红，也不是枣红）。
- * 暗端仍由同色相压暗得到，保证暗格不发灰。
- */
-const PALETTE_A2: BinaryPalette = {
+export const BINARY_PALETTE: BinaryPalette = {
   passAnchor: '#26968a',
   passShadow: '#0c1e1e',
   failAnchor: '#c0453e',
   failShadow: '#1f0c0b',
-  unknownBase: '#0d1520',
-  flat: false,
-  cellOutline: null
-}
-
-export const BINARY_PALETTES: Record<PaletteVariant, BinaryPalette> = {
-  A: PALETTE_A,
-  B: PALETTE_B,
-  A2: PALETTE_A2
+  unknownBase: '#0d1520'
 }
 
 /** 明度调制的最暗系数：0 表示完全贴合暗端，1 表示完全贴合锚点 */
@@ -100,12 +50,12 @@ const TINT_SPAN = 0.7
 const MARGIN_PERCENTILE = 0.9
 
 /**
- * 热力色带停靠点（t = 0 表示该站点最小值，t = 1 表示最大值）—— A / A′ 版共用。
+ * 热力色带停靠点（t = 0 表示该站点最小值，t = 1 表示最大值）。
  *
  * 设计意图（请勿“顺手统一”）：热力图的颜色编码的是**数值高低**，不是好坏，
  * 所以暖端保持琥珀 #d99a2b，不随二值模式的 FAIL 一起变红。
  * 一旦暖端也变红，用户会把“数值高”直接读成“失效”，与二值模式的红色语义冲突。
- * 二值模式的 FAIL 只在 PALETTE_A2.failAnchor 中定义，两套色板互不影响。
+ * 二值模式的 FAIL 只由 BINARY_PALETTE.failAnchor 定义，两套色板互不影响。
  */
 export const HEAT_STOPS: ReadonlyArray<{ t: number; color: string }> = [
   { t: 0, color: '#102b3f' },
@@ -113,19 +63,6 @@ export const HEAT_STOPS: ReadonlyArray<{ t: number; color: string }> = [
   { t: 0.66, color: '#2fbf8f' },
   { t: 1, color: '#d99a2b' }
 ]
-
-/** 热力色带停靠点 —— B 版：同一色相顺序整体降饱和、压明度跨度 */
-export const HEAT_STOPS_MUTED: ReadonlyArray<{ t: number; color: string }> = [
-  { t: 0, color: '#16222b' },
-  { t: 0.34, color: '#28454c' },
-  { t: 0.66, color: '#5c8378' },
-  { t: 1, color: '#b08a55' }
-]
-
-/** 按版本取热力色带 */
-export function heatStopsFor(variant: PaletteVariant): ReadonlyArray<{ t: number; color: string }> {
-  return variant === 'B' ? HEAT_STOPS_MUTED : HEAT_STOPS
-}
 
 /** 网格线 / 轴线 / 刻度文字等“结构色”，集中在这里便于导出时复用 */
 export const CHART_STRUCTURE = {
@@ -177,8 +114,8 @@ export function mixColor(from: string, to: string, t: number): string {
  * 取样热力色带。
  * t 会被夹到 0–1；NaN 视为 0（调用方本不该把无数据点交进来，这里只做兜底）。
  */
-export function sampleHeatColor(t: number, variant: PaletteVariant = 'A'): string {
-  const stops = heatStopsFor(variant)
+export function sampleHeatColor(t: number): string {
+  const stops = HEAT_STOPS
   if (!Number.isFinite(t)) return stops[0].color
   const clamped = Math.max(0, Math.min(1, t))
   for (let i = 0; i < stops.length - 1; i++) {
@@ -209,12 +146,12 @@ export function valueToT(
 }
 
 /** 图例竖色带的取样数组（从下到上），供 drawStatic 与导出共用 */
-export function heatGradientStops(steps = 24, variant: PaletteVariant = 'A'): string[] {
-  return Array.from({ length: steps }, (_, i) => sampleHeatColor(i / (steps - 1), variant))
+export function heatGradientStops(steps = 24): string[] {
+  return Array.from({ length: steps }, (_, i) => sampleHeatColor(i / (steps - 1)))
 }
 
 /**
- * A 版的单格颜色：明度由 |margin| 归一化值 m 调制。
+ * 单格颜色：明度由 |margin| 归一化值 m 调制。
  *
  * 公式：color = mix(shadow, anchor, 0.30 + 0.70 × m)
  *  - m = 0（刚好贴住 spec）：只保留 30% 锚点色，色块压到最暗；
@@ -222,26 +159,21 @@ export function heatGradientStops(steps = 24, variant: PaletteVariant = 'A'): st
  * 暗端由 shadow 显式给出，而不是简单乘 alpha，
  * 这样暗格仍然保持色相、不会因半透明与底色混出脏色。
  */
-export function binaryMarginColor(variant: PaletteVariant, state: number, m: number): string {
-  const palette = BINARY_PALETTES[variant]
-  if (state === CELL_UNKNOWN) return palette.unknownBase
-  const anchor = state === 1 ? palette.passAnchor : palette.failAnchor
-  const shadow = state === 1 ? palette.passShadow : palette.failShadow
-  // B 版为平坦填充：m 不参与计算
-  if (palette.flat) return anchor
+export function binaryMarginColor(state: number, m: number): string {
+  if (state === CELL_UNKNOWN) return BINARY_PALETTE.unknownBase
+  const anchor = state === 1 ? BINARY_PALETTE.passAnchor : BINARY_PALETTE.failAnchor
+  const shadow = state === 1 ? BINARY_PALETTE.passShadow : BINARY_PALETTE.failShadow
   const clamped = Number.isFinite(m) ? Math.max(0, Math.min(1, m)) : 0
   return mixColor(shadow, anchor, TINT_MIN_MIX + TINT_SPAN * clamped)
 }
 
 /** 图例用的色卡渐变（从暗端到锚点），保证“图例与主图同源” */
-export function binarySwatchStops(variant: PaletteVariant, state: number, steps = 4): string[] {
-  return Array.from({ length: steps }, (_, i) =>
-    binaryMarginColor(variant, state, i / (steps - 1))
-  )
+export function binarySwatchStops(state: number, steps = 4): string[] {
+  return Array.from({ length: steps }, (_, i) => binaryMarginColor(state, i / (steps - 1)))
 }
 
 /**
- * 计算每个格子的 |margin| 归一化值（0–1），供 A 版明度调制使用。
+ * 计算每个格子的 |margin| 归一化值（0–1），供二值模式的明度调制使用。
  *
  * 归一化口径：
  *  - 用 evaluatePoint 的 marginPct（与 hover / 规格面板同一套 margin 语义）；

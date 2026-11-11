@@ -15,8 +15,6 @@ export function ChartStage(): JSX.Element {
   const report = useAppStore((s) => s.report)
   const colorMode = useAppStore((s) => s.colorMode)
   const setColorMode = useAppStore((s) => s.setColorMode)
-  // 阶段 ③b：二值配色版本（A / B），两版都保留，暂由开发参数切换，等用户定稿
-  const palette = useAppStore((s) => s.palette)
 
   const activeSite = dataset?.sites.find((site) => site.siteId === activeSiteId) ?? null
   const nx = dataset?.xAxis.values.length ?? 0
@@ -149,7 +147,6 @@ export function ChartStage(): JSX.Element {
               xAxis={dataset.xAxis}
               yAxis={dataset.yAxis}
               mode={colorMode}
-              variant={palette}
             />
           </div>
         ) : dataset ? (
