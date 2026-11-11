@@ -1,6 +1,7 @@
 import type { ShmooDataset } from '@shared/types/shmoo'
 import type { ChartBench } from '../chart/perf'
 import { DEFAULT_PADDING, cellCenter, computeGeometry } from '../chart/geometry'
+import { computeMarginTints } from '../chart/colors'
 import { drawStaticLayer } from '../chart/render2d'
 import { useAppStore } from '../state/store'
 
@@ -12,6 +13,7 @@ import { useAppStore } from '../state/store'
  *
  *   ?demo=1                  载入 samples/sample-2d-mcu.csv（二值模式）
  *   ?demo=1&mode=heat        以热力模式打开
+ *   ?demo=1&palette=a|b      选择二值配色版本（A 同源明度调制 / B 降饱和细描边）
  *   ?demo=1&hover=21,9       载入后在该格子上触发一次 pointermove（截图用）
  *   ?demo=1&bench=1          额外跑 1920×1080 @ DPR2 的静态层压测，结果写入 window.__shmooBench
  *
@@ -148,10 +150,13 @@ function runBench(dataset: ShmooDataset): void {
     valueLabel: dataset.valueLabel,
     valueUnit: dataset.valueUnit,
     mode: 'binary' as const,
+    // 压测取 A 版：A 版逐格计算 margin 明度，是两版里更重的那一版
+    variant: 'A' as const,
+    tint: computeMarginTints(site, dataset.spec),
     motion: { enabled: false, delaySpan: 0, cellDuration: 0, elapsed: 0 }
   }
 
-  // 预热 5 次（首次会创建斜纹 pattern、字体测量等），不计入结果
+  // 预热 5 次（首次会做字体测量与路径构建），不计入结果
   for (let i = 0; i < 5; i++) drawStaticLayer(ctx, { width, height, dpr }, input)
 
   const samples: number[] = []
@@ -189,6 +194,12 @@ export async function maybeLoadDemo(): Promise<void> {
   const mode = params.get('mode')
   if (mode === 'heat' || mode === 'binary') {
     useAppStore.setState({ colorMode: mode })
+  }
+
+  // 二值配色版本：?palette=a / ?palette=b（大小写不敏感）
+  const palette = params.get('palette')?.toUpperCase()
+  if (palette === 'A' || palette === 'B') {
+    useAppStore.setState({ palette })
   }
 
   // 等图表挂载后再做悬停/压测，避免在空态上操作

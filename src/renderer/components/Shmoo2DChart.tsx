@@ -6,6 +6,8 @@ import { DEFAULT_PADDING, cellCenter, computeGeometry, hitTest, tickDecimals } f
 import type { CellIndex, ChartGeometry } from '../chart/geometry'
 import { drawBoundaryLayer, drawInteractionLayer, drawStaticLayer } from '../chart/render2d'
 import type { ChartColorMode, MotionInput } from '../chart/render2d'
+import { computeMarginTints } from '../chart/colors'
+import type { PaletteVariant } from '../chart/colors'
 import type { ChartPerf } from '../chart/perf'
 import { useLayeredCanvas } from '../chart/useLayeredCanvas'
 import type { LayerName, LayerRenderer } from '../chart/useLayeredCanvas'
@@ -38,6 +40,8 @@ interface Shmoo2DChartProps {
   xAxis: Axis
   yAxis: Axis
   mode: ChartColorMode
+  /** 配色版本 A / B（阶段 ③b 提供两版供选择） */
+  variant: PaletteVariant
 }
 
 /** 当前悬停的格子（只保存索引，像素位置由几何实时算出） */
@@ -77,7 +81,7 @@ function formatMeasure(value: number, range: { min: number; max: number } | null
   return value.toFixed(decimals)
 }
 
-export function Shmoo2DChart({ dataset, site, xAxis, yAxis, mode }: Shmoo2DChartProps): JSX.Element {
+export function Shmoo2DChart({ dataset, site, xAxis, yAxis, mode, variant }: Shmoo2DChartProps): JSX.Element {
   const reducedMotion = useReducedMotion()
 
   // ---- 绘制阶段需要的最新状态（用 ref 保存，renderers 只依赖 ref，不会因 state 变化重建） ----
@@ -99,6 +103,14 @@ export function Shmoo2DChart({ dataset, site, xAxis, yAxis, mode }: Shmoo2DChart
     pushSample(perfRef.current[key], ms)
   }, [])
 
+  // ---- margin 明度调制数据（A 版使用） ----
+  // 每个格子的 |margin| 归一化到 0–1；spec / 数据 / 站点变化时重算一次。
+  // 900 个点的计算量远小于一帧预算，因此不需要放进 Worker。
+  const marginTints = useMemo(
+    () => computeMarginTints(site, dataset.spec),
+    [site, dataset.spec, dataset.revision]
+  )
+
   // ---- 三层绘制函数 ----
   // 注意：只依赖数据与轴（以及绘制时不会变化的常量），
   // hover / 动画进度 / 配色模式都通过 ref 读取，避免重建 renderers。
@@ -108,7 +120,9 @@ export function Shmoo2DChart({ dataset, site, xAxis, yAxis, mode }: Shmoo2DChart
       yAxis,
       site,
       valueLabel: dataset.valueLabel,
-      valueUnit: dataset.valueUnit
+      valueUnit: dataset.valueUnit,
+      variant,
+      tint: marginTints
     }
 
     return {
@@ -143,7 +157,7 @@ export function Shmoo2DChart({ dataset, site, xAxis, yAxis, mode }: Shmoo2DChart
         recordTiming('interaction', performance.now() - startedAt)
       }
     }
-  }, [dataset.valueLabel, dataset.valueUnit, site, xAxis, yAxis, recordTiming])
+  }, [dataset.valueLabel, dataset.valueUnit, site, xAxis, yAxis, recordTiming, variant, marginTints])
 
   const { containerRef, canvasRefs, size, repaint } = useLayeredCanvas(renderers)
 
@@ -191,7 +205,7 @@ export function Shmoo2DChart({ dataset, site, xAxis, yAxis, mode }: Shmoo2DChart
     raf = window.requestAnimationFrame(tick)
     return () => window.cancelAnimationFrame(raf)
     // 尺寸从 0 变为有效值时也要启动；真正改变宽高不重新播放入场动画
-  }, [dataset.id, dataset.revision, site.siteId, mode, reducedMotion, size.width > 0, size.height > 0, repaint])
+  }, [dataset.id, dataset.revision, site.siteId, mode, variant, reducedMotion, size.width > 0, size.height > 0, repaint])
 
   // hover 变化 → 只重绘交互层
   useEffect(() => {

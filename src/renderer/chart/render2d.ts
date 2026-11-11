@@ -1,9 +1,11 @@
 import type { Axis, SiteGrid } from '@shared/types/shmoo'
 import { CELL_UNKNOWN } from '@shared/types/shmoo'
 import {
-  BINARY_COLORS,
+  BINARY_PALETTES,
   CHART_STRUCTURE,
-  binaryColor,
+  type PaletteVariant,
+  binaryMarginColor,
+  binarySwatchStops,
   heatGradientStops,
   sampleHeatColor,
   valueToT
@@ -47,6 +49,10 @@ export interface ChartDataInput {
   valueLabel: string
   valueUnit: string
   mode: ChartColorMode
+  /** 配色版本：A = 同源色板 + margin 明度调制，B = 降饱和 + 细描边 */
+  variant: PaletteVariant
+  /** 每个格子的 |margin| 归一化值（0–1）；null 表示无法计算，按 0.5 兜底 */
+  tint: Float32Array | null
 }
 
 /** 入场动画参数（毫秒） */
@@ -145,9 +151,10 @@ export function drawStaticLayer(
   size: CanvasSize,
   input: StaticLayerInput
 ): void {
-  const { geometry, site, mode, motion } = input
+  const { geometry, site, mode, motion, variant, tint } = input
   const { plot } = geometry
   const { dpr, width, height } = size
+  const palette = BINARY_PALETTES[variant]
 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, width, height)
@@ -183,24 +190,29 @@ export function drawStaticLayer(
         // 缺失点：深底 + 45° 斜纹，表达“未测”而不是“失败”
         const w = right - left
         const h = bottom - top
-        ctx.fillStyle = BINARY_COLORS.unknownBase
+        ctx.fillStyle = palette.unknownBase
         ctx.fillRect(left, top, w, h)
         drawCellHatch(ctx, left, top, w, h)
       } else if (mode === 'binary') {
-        ctx.fillStyle = binaryColor(state)
+        // A 版：明度随 |margin| 变化（贴近 spec 更暗，远离更亮）；
+        // B 版：平坦降饱和色，层次交给描边与边界线
+        const m = tint ? tint[index] : 0.5
+        ctx.fillStyle = binaryMarginColor(variant, state, m)
         ctx.fillRect(left, top, right - left, bottom - top)
       } else {
         const t = valueToT(value, site.valueRange)
-        ctx.fillStyle = sampleHeatColor(t)
+        ctx.fillStyle = sampleHeatColor(t, variant)
         ctx.fillRect(left, top, right - left, bottom - top)
       }
     }
   }
   ctx.globalAlpha = 1
 
-  // 3. 低对比网格线：标出单元格边界，强化“矩阵/仪器”而非“渐变海报”的观感
-  ctx.strokeStyle = CHART_STRUCTURE.gridLine
-  ctx.lineWidth = 1
+  // 3. 单元格分隔线
+  //    A 版：低对比网格线，只做“矩阵感”暗示；
+  //    B 版：1 设备像素的深色描边，这是该版本表达格子边界的主要手段。
+  ctx.strokeStyle = palette.cellOutline ?? CHART_STRUCTURE.gridLine
+  ctx.lineWidth = palette.cellOutline ? 1 / dpr : 1
   ctx.beginPath()
   for (let ix = 0; ix <= nx; ix++) {
     const x = snap(geometry.x.edges[ix], dpr) + 0.5 / dpr
@@ -328,8 +340,9 @@ function drawLegend(
   size: CanvasSize,
   input: StaticLayerInput
 ): void {
-  const { geometry, site, mode, valueLabel, valueUnit } = input
+  const { geometry, site, mode, valueLabel, valueUnit, variant } = input
   const { plot } = geometry
+  const palette = BINARY_PALETTES[variant]
   const x0 = plot.x + plot.w + 18
   const y0 = plot.y + 4
   const width = size.width - x0 - 8
@@ -343,23 +356,47 @@ function drawLegend(
     ctx.fillStyle = CHART_STRUCTURE.legendMuted
     ctx.fillText('判定', x0, y0 + 6)
 
-    const rows: Array<{ color: string; label: string; hatch?: boolean }> = [
-      { color: BINARY_COLORS.pass, label: 'PASS' },
-      { color: BINARY_COLORS.fail, label: 'FAIL' },
-      { color: BINARY_COLORS.unknownBase, label: 'NO DATA', hatch: true }
+    const rows: Array<{ state: number; label: string; hatch?: boolean }> = [
+      { state: 1, label: 'PASS' },
+      { state: 0, label: 'FAIL' },
+      { state: 2, label: 'NO DATA', hatch: true }
     ]
     rows.forEach((row, i) => {
       const y = y0 + 24 + i * 18
-      ctx.fillStyle = row.color
-      ctx.fillRect(x0, y - 5, 10, 10)
       if (row.hatch) {
+        ctx.fillStyle = palette.unknownBase
+        ctx.fillRect(x0, y - 5, 10, 10)
         // 与色块一致的斜纹示意：复用同一个描线函数，步长按 10px 小色卡缩小
         drawCellHatch(ctx, x0, y - 5, 10, 10, 4)
+      } else if (palette.flat) {
+        // B 版：平坦色块 + 与主图一致的 1 设备像素深色描边
+        ctx.fillStyle = binaryMarginColor(variant, row.state, 1)
+        ctx.fillRect(x0, y - 5, 10, 10)
+        ctx.strokeStyle = palette.cellOutline ?? CHART_STRUCTURE.gridLine
+        ctx.lineWidth = size.dpr > 1.5 ? 0.5 : 1
+        ctx.strokeRect(x0 + 0.25, y - 4.75, 9.5, 9.5)
+      } else {
+        // A 版：色卡画成“暗端 → 锚点”的竖向渐变，与主图的 margin 明度调制同源
+        const stops = binarySwatchStops(variant, row.state, 4)
+        const stepH = 10 / stops.length
+        stops.forEach((color, k) => {
+          ctx.fillStyle = color
+          // 从下往上：最暗在底部，对应贴近 spec 的格子
+          ctx.fillRect(x0, y + 5 - (k + 1) * stepH, 10, Math.ceil(stepH))
+        })
+        ctx.strokeStyle = 'rgba(147, 166, 186, 0.22)'
+        ctx.lineWidth = 0.5
+        ctx.strokeRect(x0 + 0.25, y - 4.75, 9.5, 9.5)
       }
       ctx.fillStyle = CHART_STRUCTURE.legendText
       ctx.font = FONT_MONO_SMALL
       ctx.fillText(row.label, x0 + 16, y)
     })
+
+    // 说明图例的编码方式，避免把“亮 = 更结实”误读成“亮 = 更好/更差”
+    ctx.fillStyle = CHART_STRUCTURE.legendMuted
+    ctx.font = FONT_MONO_SMALL
+    ctx.fillText(palette.flat ? '低饱和 + 细描边' : '明度 ∝ |margin|', x0, y0 + 24 + rows.length * 18 + 2)
     return
   }
 
@@ -374,7 +411,7 @@ function drawLegend(
   ctx.fillText(valueUnit ? `${valueLabel} (${valueUnit})` : valueLabel, x0, y0 + 8)
 
   // 从下往上画：底部是最小值
-  const steps = heatGradientStops(24)
+  const steps = heatGradientStops(24, variant)
   const stepH = barHeight / steps.length
   steps.forEach((color, i) => {
     ctx.fillStyle = color
