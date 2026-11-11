@@ -12,7 +12,9 @@
     "preview": "electron-vite preview",
     "typecheck:node": "tsc -p tsconfig.node.json --noEmit",
     "typecheck:web": "tsc -p tsconfig.web.json --noEmit",
-    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web && npm run typecheck:tests",
+    "typecheck:tests": "tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run",
     "dist": "npm run build && electron-builder"
   },
   "dependencies": {
@@ -26,9 +28,11 @@
     "electron": "33.4.11",
     "electron-builder": "25.1.8",
     "electron-vite": "2.3.0",
+    "jsdom": "^25.0.1",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "typescript": "5.6.3",
-    "vite": "5.4.11"
+    "vite": "5.4.11",
+    "vitest": "^2.1.8"
   }
 }

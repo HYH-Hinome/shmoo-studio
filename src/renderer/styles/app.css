@@ -236,6 +236,76 @@ select {
   color: var(--color-text-secondary);
 }
 
+/* 站点切换列表（真实 site 由数据决定，见 D2） */
+.rail__list {
+  margin: 0;
+  padding: var(--space-2);
+  list-style: none;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.site-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+.site-item:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-raised);
+}
+
+/* 当前查看的站点：左侧青色竖条 + 略亮的底色，与仪器上的“选中通道”一致 */
+.site-item.is-active {
+  border-color: var(--color-line);
+  background: var(--color-bg-active);
+  color: var(--color-text-primary);
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+.site-item__name {
+  font-weight: 500;
+}
+
+.site-item__meta {
+  font-size: var(--text-2xs);
+  color: var(--color-text-disabled);
+  white-space: nowrap;
+}
+
+.site-item.is-active .site-item__meta {
+  color: var(--color-text-muted);
+}
+
+/* 单 site 数据集（R11）：不显示切换器，只给一行只读说明 */
+.rail__single {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-line-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-raised);
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+
 /* ============================================================
    中央画布区
    ============================================================ */
@@ -268,6 +338,67 @@ select {
   font-size: var(--text-2xs);
   letter-spacing: 0.08em;
   color: var(--color-text-disabled);
+}
+
+/* 导入提示计数：用警告色区分于普通只读徽标 */
+.stage__badge--warn {
+  padding: 1px var(--space-2);
+  border: 1px solid rgba(224, 176, 80, 0.35);
+  border-radius: 999px;
+  color: var(--color-warn, #e0b050);
+}
+
+/* 数据集信息卡：阶段 ② 的占位内容，数字全部来自真实解析结果 */
+.stage__info {
+  position: relative;
+  z-index: 1;
+  width: min(560px, 82%);
+  padding: var(--space-8);
+  border: 1px solid var(--color-line-subtle);
+  border-radius: var(--radius-md);
+  background: rgba(10, 14, 20, 0.72);
+  text-align: left;
+}
+
+.stage__info .stage__title {
+  margin-bottom: var(--space-2);
+  font-size: var(--text-lg);
+  text-align: left;
+}
+
+.stage__info .stage__desc {
+  margin-bottom: var(--space-5);
+  text-align: left;
+}
+
+/* 关键读数：两列网格，label 在上、值在下，方便快速扫读 */
+.stage__facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin: 0 0 var(--space-4);
+}
+
+.stage__facts div {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-line-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-raised);
+}
+
+.stage__facts dt {
+  font-size: var(--text-2xs);
+  letter-spacing: 0.06em;
+  color: var(--color-text-disabled);
+}
+
+.stage__facts dd {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 分段控件（阶段 ③/④ 会接真实的 2D/1D 切换） */
@@ -594,6 +725,12 @@ select {
   color: var(--color-text-primary);
 }
 
+/* 统计值里的单位：比主数值小一号，避免抢读数 */
+.stat__unit {
+  font-size: var(--text-2xs);
+  color: var(--color-text-muted);
+}
+
 /* ============================================================
    底部状态栏
    ============================================================ */
@@ -631,6 +768,34 @@ select {
 
 .statusbar__spacer {
   flex: 1;
+}
+
+/* 导入后的真实统计：与状态文案之间留出间距，读数用等宽字体保证纵向对齐 */
+.statusbar__stats {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-left: var(--space-3);
+  margin-left: var(--space-1);
+  border-left: 1px solid var(--color-line-strong);
+  color: var(--color-text-muted);
+}
+
+.statusbar__stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  white-space: nowrap;
+}
+
+.statusbar__stat .mono {
+  color: var(--color-text-primary);
+}
+
+.statusbar__divider {
+  width: 1px;
+  height: 9px;
+  background: var(--color-line);
 }
 
 .statusbar__meta {

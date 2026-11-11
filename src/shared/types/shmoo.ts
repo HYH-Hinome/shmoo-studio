@@ -105,6 +105,10 @@ export interface ShmooDataset {
   meta: Record<string, string>
   /** 图标题，缺省用文件名 */
   title: string
+  /** 测量值显示名（如 VOH），图例与导出使用 */
+  valueLabel: string
+  /** 测量值单位（如 mV） */
+  valueUnit: string
   xAxis: Axis
   /** 1D 数据没有 y 轴时为 null */
   yAxis: Axis | null
