@@ -1,0 +1,25 @@
+appId: com.shmoostudio.app
+productName: Shmoo Studio
+directories:
+  output: release
+  buildResources: resources
+# 只打包构建产物与清单，源码与样例不进安装包
+files:
+  - out/**/*
+  - package.json
+asar: true
+win:
+  target:
+    - target: portable
+      arch: [x64]
+    - target: nsis
+      arch: [x64]
+  artifactName: ${productName}-${version}-${arch}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: Shmoo Studio
+portable:
+  artifactName: ${productName}-${version}-portable.${ext}
