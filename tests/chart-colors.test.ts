@@ -130,10 +130,10 @@ describe('binaryMarginColor（A′：margin 明度调制 + 正红 FAIL）', () =
   })
 })
 
-describe('passFailColor（纯二值数据：饱和平涂，不做明度调制）', () => {
-  it('PASS = #34C759，FAIL = #FF3B30，未知格回到缺测底色', () => {
-    expect(passFailColor(CELL_PASS)).toBe('#34C759')
-    expect(passFailColor(CELL_FAIL)).toBe('#FF3B30')
+describe('passFailColor（纯二值数据：中间档平涂，不做明度调制）', () => {
+  it('PASS = #2DAF72，FAIL = #E04037，未知格回到缺测底色', () => {
+    expect(passFailColor(CELL_PASS)).toBe('#2DAF72')
+    expect(passFailColor(CELL_FAIL)).toBe('#E04037')
     expect(passFailColor(CELL_UNKNOWN)).toBe(BINARY_PALETTE.unknownBase)
   })
 
@@ -141,8 +141,8 @@ describe('passFailColor（纯二值数据：饱和平涂，不做明度调制）
     const colors = new Set<string>()
     for (let i = 0; i < 900; i++) colors.add(passFailColor(i % 2))
     expect(colors.size).toBe(2)
-    expect(colors.has('#34C759')).toBe(true)
-    expect(colors.has('#FF3B30')).toBe(true)
+    expect(colors.has('#2DAF72')).toBe(true)
+    expect(colors.has('#E04037')).toBe(true)
   })
 })
 

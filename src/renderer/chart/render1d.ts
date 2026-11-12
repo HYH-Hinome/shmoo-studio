@@ -512,15 +512,16 @@ function drawCurve(
   ctx.stroke()
 
   // 2. spec 区域：上限以上、下限以下铺极淡的红，先让人看到“哪里是禁区”
+  // flat（纯二值）时与平涂 FAIL 色 #E04037 同源，避免禁区底色和点色不是一个红
   const spec = dataset.spec
   if (typeof spec.max === 'number') {
     const py = valueToY(spec.max, scale, plot.y, plot.h)
-    ctx.fillStyle = flat ? 'rgba(255, 59, 48, 0.07)' : 'rgba(181, 86, 79, 0.07)'
+    ctx.fillStyle = flat ? 'rgba(224, 64, 55, 0.07)' : 'rgba(181, 86, 79, 0.07)'
     ctx.fillRect(plot.x, plot.y, plot.w, Math.max(0, py - plot.y))
   }
   if (typeof spec.min === 'number') {
     const py = valueToY(spec.min, scale, plot.y, plot.h)
-    ctx.fillStyle = flat ? 'rgba(255, 59, 48, 0.07)' : 'rgba(181, 86, 79, 0.07)'
+    ctx.fillStyle = flat ? 'rgba(224, 64, 55, 0.07)' : 'rgba(181, 86, 79, 0.07)'
     ctx.fillRect(plot.x, py, plot.w, Math.max(0, plot.y + plot.h - py))
   }
 
