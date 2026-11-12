@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { ImportReport, ShmooDataset, SpecLimit } from '@shared/types/shmoo'
+import { applySpecToDataset, isSameSpec } from '@shared/spec/apply'
 import { parseCsvInWorker } from '../lib/parseCsv'
 import type { SliceAxis, SliceRef } from '../chart/slice'
 import type { BoxSelection } from '../chart/interaction'
@@ -36,6 +37,10 @@ interface AppState {
   activeSiteId: string | null
   /** 全局共用 spec（D1），所有 site 同步 */
   spec: SpecLimit
+  /** 导入时 CSV 里声明的原始 spec（阶段 ⑥「重置为文件值」使用） */
+  fileSpec: SpecLimit | null
+  /** spec 修改历史（阶段 ⑥ 一步撤销）：保存被替换掉的旧 spec，最多 20 条 */
+  specHistory: SpecLimit[]
   /** 2D 图表配色模式：二值 / 热力（阶段 ③） */
   colorMode: ColorMode
   /** 1D 图表形态：色带 / 曲线（阶段 ④），与 2D 的 colorMode 互不影响 */
@@ -71,7 +76,16 @@ interface AppState {
   /** 读取应用版本与平台信息 */
   loadAppInfo: () => Promise<void>
   setActiveSite: (siteId: string) => void
-  setSpec: (spec: SpecLimit) => void
+  /**
+   * 阶段 ⑥：应用新 spec —— 重算所有 site 的 pass / passCount 并刷新派生数据。
+   * 不会重新解析 CSV，也不会清空锁定 / 框选（格子索引不变）。
+   * 传进来的 spec 必须已经通过 parseSpecInput 校验。
+   */
+  applySpec: (spec: SpecLimit) => void
+  /** 恢复成 CSV 文件里声明的 spec（可被再次撤销） */
+  resetSpec: () => void
+  /** 撤销上一步 spec 修改；没有历史时什么都不做 */
+  undoSpec: () => void
   setColorMode: (mode: ColorMode) => void
   setOneDForm: (form: OneDForm) => void
   /** 开关氛围动效；关闭时立即停掉 rAF 循环，画面回到完全静止 */
@@ -104,6 +118,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   dataset: null,
   activeSiteId: null,
   spec: DEFAULT_SPEC,
+  fileSpec: null,
+  specHistory: [],
   colorMode: 'binary',
   oneDForm: 'band',
   ambientMotion: false,
@@ -146,6 +162,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           dataset: null,
           report,
           activeSiteId: null,
+          fileSpec: null,
+          specHistory: [],
           isParsing: false,
           statusText: '导入失败',
           error: fatal?.message ?? 'CSV 无法解析'
@@ -158,6 +176,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         report,
         activeSiteId: dataset.sites[0]?.siteId ?? null,
         spec: dataset.spec,
+        // 记下文件里的原始 spec，供「重置为文件值」使用；历史清空
+        fileSpec: dataset.spec,
+        specHistory: [],
         isParsing: false,
         statusText: `已导入 ${dataset.fileName} · ${dataset.kind.toUpperCase()} · ${dataset.sites.length} site`,
         error: null,
@@ -187,7 +208,51 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 切换站点意味着整张图的数值都换了：锁定格与框选区域不再可信，必须重置，
   // 否则浮层会停在一个“新站点里同名但不同数据”的格子上（看起来像缓存了旧读数）。
   setActiveSite: (siteId) => set({ activeSiteId: siteId, selection: null, box: null }),
-  setSpec: (spec) => set({ spec }),
+
+  /**
+   * 应用新 spec（阶段 ⑥）。
+   * - spec 没变化时只同步 store 字段，不写历史、不 bump revision；
+   * - 有变化时：重算所有 site → 替换 dataset → 旧 spec 入历史。
+   *   锁定格 / 框选保持不动：格子坐标没有变，只是判定数字变了。
+   */
+  applySpec: (nextSpec) => {
+    const { dataset, specHistory } = get()
+    if (!dataset) {
+      set({ spec: nextSpec })
+      return
+    }
+    // 相同 spec 反复输入（防抖结束仍相同）不应该制造无意义的历史
+    if (isSameSpec(dataset.spec, nextSpec)) {
+      set({ spec: dataset.spec })
+      return
+    }
+    const nextDataset = applySpecToDataset(dataset, nextSpec)
+    set({
+      dataset: nextDataset,
+      spec: nextDataset.spec,
+      // 只保留最近 20 步，避免长时间拖动滑杆时无限增长
+      specHistory: [...specHistory, dataset.spec].slice(-20)
+    })
+  },
+
+  resetSpec: () => {
+    const { fileSpec } = get()
+    if (!fileSpec) return
+    get().applySpec(fileSpec)
+  },
+
+  undoSpec: () => {
+    const { dataset, specHistory } = get()
+    if (!dataset || specHistory.length === 0) return
+    const previous = specHistory[specHistory.length - 1]
+    const nextDataset = applySpecToDataset(dataset, previous)
+    set({
+      dataset: nextDataset,
+      spec: nextDataset.spec,
+      specHistory: specHistory.slice(0, -1)
+    })
+  },
+
   setColorMode: (mode) => set({ colorMode: mode }),
   setOneDForm: (form) => set({ oneDForm: form }),
   setAmbientMotion: (enabled) => set({ ambientMotion: enabled }),
@@ -272,6 +337,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       dataset,
       activeSiteId: dataset?.sites[0]?.siteId ?? null,
       spec: dataset?.spec ?? DEFAULT_SPEC,
+      // 外部直接换数据集（样例 / 测试）时同样重置 spec 基线
+      fileSpec: dataset?.spec ?? null,
+      specHistory: [],
       // 换数据集后旧的切片下标可能越界，直接清空，避免指到别的数据上
       slice: null,
       sliceMarker: null,

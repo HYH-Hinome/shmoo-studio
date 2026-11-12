@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import type { ShmooDataset, SiteGrid } from '@shared/types/shmoo'
 import { CELL_FAIL, CELL_PASS } from '@shared/types/shmoo'
@@ -157,7 +157,13 @@ export function Shmoo1DChart({ dataset, site, form }: Shmoo1DChartProps): JSX.El
     }
     raf = window.requestAnimationFrame(tick)
     return () => window.cancelAnimationFrame(raf)
-  }, [dataset.id, dataset.revision, site.siteId, form, reducedMotion, size.width > 0, size.height > 0, repaint])
+  }, [dataset.id, site.siteId, form, reducedMotion, size.width > 0, size.height > 0, repaint])
+
+  // 阶段 ⑥：spec 编辑后直接重绘（含切片视图），不重播揭示动画
+  useLayoutEffect(() => {
+    if (dataset.revision <= 0) return
+    repaint('all')
+  }, [dataset.revision, repaint])
 
   useEffect(() => {
     repaint('interaction')

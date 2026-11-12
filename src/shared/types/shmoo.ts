@@ -71,6 +71,16 @@ export interface SiteGrid {
   value: Float32Array
   /** 三态判定结果，长度与 value 相同 */
   pass: Uint8Array
+  /**
+   * 解析时直接来自 CSV `pass` 列的原始判定（阶段 ⑥）。
+   * CELL_UNKNOWN 表示该格没有可用的 pass 列取值。
+   *
+   * 为什么需要保留：界面改 spec 后需要在不重新解析 CSV 的前提下，
+   * 精确复现「用新 spec 重新解析」的结果。pass_source=file / 二值数据
+   * 依赖文件里的 pass 列，只有保留原始 token 才能做到完全一致。
+   * 手工构造的 SiteGrid 可以省略该字段（缺省视为没有文件判定）。
+   */
+  sourcePass?: Uint8Array | null
   /** 该站点测量值的实际范围（忽略 NaN）；全部无数据时为 null */
   valueRange: { min: number; max: number } | null
   /** 已知（非 NaN）单元数 */

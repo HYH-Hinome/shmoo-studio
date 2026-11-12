@@ -1,4 +1,4 @@
-import type { ShmooDataset, SiteGrid } from '@shared/types/shmoo'
+import type { ShmooDataset, SiteGrid, SpecLimit } from '@shared/types/shmoo'
 import { CELL_FAIL, CELL_PASS, CELL_UNKNOWN } from '@shared/types/shmoo'
 import type { ChartBench } from '../chart/perf'
 import { DEFAULT_PADDING, cellCenter, computeGeometry } from '../chart/geometry'
@@ -23,9 +23,12 @@ import { useAppStore } from '../state/store'
  *   ?demo=1&lock=21,9        截“锁定读数”用：直接把该格设为锁定态（真实单击由单测/浏览器实测覆盖）
  *   ?demo=1&box=8,6,16,14    截“框选统计”用：直接写入矩形框选（真实拖拽同上）
  *   ?demo=1&slice=row:12     载入 2D 样例后直接切出第 12 行（列切片写 slice=col:8）
+ *   ?demo=1&spec=min=740,max=860  载入后应用一份临时 spec（截图“编辑后”用，等价于界面输入）
+ *   ?demo=1&spec=min=780,max=840  1D 双边收窄示例：色带变成红-绿-红
  *   ?demo=1&bench=1          额外跑 1920×1080 @ DPR2 的静态层压测，结果写入 window.__shmooBench
  *   ?demo=1&bench=1&grid=100 用合成 100×100 网格压测（默认用样例的 30×30）
  *   ?demo=1&interaction-perf=1  合成 60 次跨格 pointermove，实测交互层重绘耗时并显示在页面上
+ *   ?demo=1&spec-perf=1      实测“改 spec → 重算 → 重绘”耗时（可配合 grid=100）
  *
  * 生产构建时 main.tsx 中的 `import.meta.env.DEV` 分支会被静态剔除，
  * 本文件连同样例 CSV 都不会进入产物。
@@ -100,6 +103,9 @@ async function loadDemoDataset(sample: DemoSample): Promise<ShmooDataset | null>
     report,
     activeSiteId: dataset.sites[0]?.siteId ?? null,
     spec: dataset.spec,
+    // 演示数据也记录“文件原始 spec”，让规格面板的重置按钮在 dev 下真实可用
+    fileSpec: dataset.spec,
+    specHistory: [],
     fileName: dataset.fileName,
     statusText: `演示数据 · ${dataset.kind.toUpperCase()} · ${dataset.sites.length} site`,
     error: null
@@ -469,6 +475,118 @@ async function runInteractionProbe(dataset: ShmooDataset): Promise<void> {
   console.info('[demo] 交互层耗时', result)
 }
 
+/**
+ * 阶段 ⑥ 性能探针（仅 dev，`?demo=1&spec-perf=1`，可加 `&grid=100`）。
+ *
+ * 测三件事：
+ *  1. 纯重算耗时：直接调用 applySpecToDataset，30 次取分位；
+ *  2. 静态/边界/交互三层重绘耗时：从 window.__shmooPerf 读 rAF 内真实绘制时长；
+ *  3. 端到端算力：flushSync 提交 + 三层绘制之和（不含等待显示器刷新的空转）。
+ * 目标：100×100 端到端 < 50ms（交互级）。
+ */
+async function runSpecPerfProbe(dataset: ShmooDataset): Promise<void> {
+  if (dataset.kind !== '2d' || !dataset.yAxis) return
+  const perf = window.__shmooPerf
+
+  // 等入场动画结束，避免把 stagger 的静态层绘制混进采样
+  await new Promise<void>((resolve) => setTimeout(resolve, 1200))
+
+  const { applySpecToDataset } = await import('@shared/spec/apply')
+  const range = dataset.sites[0]?.valueRange ?? { min: 0, max: 1 }
+  const span = range.max - range.min || 1
+  const specs: SpecLimit[] = [
+    { mode: 'window', min: range.min + span * 0.1, max: range.max - span * 0.02 },
+    { mode: 'window', min: range.min + span * 0.32, max: range.max - span * 0.18 }
+  ]
+
+  // 1) 纯判定重算（不涉及 React / 画布）
+  const compute: number[] = []
+  let cursor = dataset
+  for (let i = 0; i < 30; i++) {
+    const startedAt = performance.now()
+    cursor = applySpecToDataset(cursor, specs[i % 2])
+    compute.push(performance.now() - startedAt)
+  }
+
+  // 2) 端到端算力 = React 同步提交 + 三层画布绘制。
+  //    用 flushSync 保证提交同步完成；画布本身由 rAF 调度，所以等一帧后
+  //    从 __shmooPerf 读取本次 rAF 的真实绘制耗时，只累加计算时间，
+  //    不把“等显示器刷新”的空转算进结果（后台标签页节流也不会污染分位数）。
+  const { flushSync } = await import('react-dom')
+  const commit: number[] = []
+  const draw: number[] = []
+  const work: number[] = []
+  for (let i = 0; i < 10; i++) {
+    const beforeStatic = perf?.static.length ?? 0
+    const beforeBoundary = perf?.boundary.length ?? 0
+    const beforeInteraction = perf?.interaction.length ?? 0
+    const startedAt = performance.now()
+    flushSync(() => {
+      useAppStore.getState().applySpec(specs[i % 2])
+    })
+    const commitMs = performance.now() - startedAt
+
+    // 等本帧 rAF：repaint('all') 在这里真正落到三层 canvas
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+
+    const sumLayer = (samples: number[] | undefined, from: number): number =>
+      samples ? samples.slice(from).reduce((total, ms) => total + ms, 0) : 0
+    const drawMs =
+      sumLayer(perf?.static, beforeStatic) +
+      sumLayer(perf?.boundary, beforeBoundary) +
+      sumLayer(perf?.interaction, beforeInteraction)
+
+    commit.push(commitMs)
+    draw.push(drawMs)
+    work.push(commitMs + drawMs)
+  }
+
+  const sortedCompute = [...compute].sort((a, b) => a - b)
+  const sortedCommit = [...commit].sort((a, b) => a - b)
+  const sortedDraw = [...draw].sort((a, b) => a - b)
+  const sortedWork = [...work].sort((a, b) => a - b)
+  const result = {
+    cells: dataset.xAxis.values.length * dataset.yAxis.values.length,
+    computeMedian: quantile(sortedCompute, 0.5),
+    commitMedian: quantile(sortedCommit, 0.5),
+    drawMedian: quantile(sortedDraw, 0.5),
+    e2eMedian: quantile(sortedWork, 0.5),
+    e2eP95: quantile(sortedWork, 0.95),
+    e2eMax: sortedWork[sortedWork.length - 1] ?? 0,
+    samples: work.length
+  }
+
+  const text =
+    `spec 重算 + 重绘 · ${result.cells} 格\n` +
+    `compute ${result.computeMedian.toFixed(2)} ms · commit ${result.commitMedian.toFixed(2)} ms · draw ${result.drawMedian.toFixed(2)} ms\n` +
+    `端到端 median ${result.e2eMedian.toFixed(1)} ms · p95 ${result.e2eP95.toFixed(1)} ms · max ${result.e2eMax.toFixed(1)} ms`
+
+  const badge = document.createElement('div')
+  badge.id = 'perf-badge'
+  badge.textContent = text
+  badge.style.cssText = [
+    'position:fixed',
+    'left:12px',
+    'top:12px',
+    'z-index:9999',
+    'padding:10px 12px',
+    'background:rgba(6,10,14,0.92)',
+    'border:1px solid rgba(111,227,239,0.7)',
+    'border-radius:6px',
+    'color:#eaf6ff',
+    'font:12px/1.5 "JetBrains Mono",monospace',
+    'font-variant-numeric:tabular-nums',
+    'white-space:pre',
+    'pointer-events:none'
+  ].join(';')
+  document.body.appendChild(badge)
+  document.title =
+    `SPEC-PERF compute=${result.computeMedian.toFixed(2)} draw=${result.drawMedian.toFixed(2)}` +
+    ` e2e=${result.e2eMedian.toFixed(1)} p95=${result.e2eP95.toFixed(1)} max=${result.e2eMax.toFixed(1)}` +
+    ` cells=${result.cells}`
+  console.info('[demo] spec 重算+重绘耗时', result)
+}
+
 /** 入口：main.tsx 在 DEV 下动态调用 */
 export async function maybeLoadDemo(): Promise<void> {
   if (!import.meta.env.DEV) return
@@ -497,7 +615,7 @@ export async function maybeLoadDemo(): Promise<void> {
       yAxis: { ...dataset.yAxis, values: Array.from({ length: gridParam }, (_, j) => j) },
       sites: [gridSite]
     }
-    useAppStore.setState({ dataset: synthetic, activeSiteId: gridSite.siteId })
+    useAppStore.setState({ dataset: synthetic, activeSiteId: gridSite.siteId, spec: synthetic.spec, fileSpec: synthetic.spec, specHistory: [] })
     // 自检脚本读的是 window 上的引用，必须同步替换，否则像素断言会按 30×30 的几何去取样
     window.__shmooDemo = { dataset: synthetic, site: gridSite }
     dataset = synthetic
@@ -532,7 +650,7 @@ export async function maybeLoadDemo(): Promise<void> {
       yAxis: null,
       sites: [{ ...source, value, pass, valueRange: source.valueRange, knownCount, passCount }]
     }
-    useAppStore.setState({ dataset: oneD, activeSiteId: oneD.sites[0].siteId })
+    useAppStore.setState({ dataset: oneD, activeSiteId: oneD.sites[0].siteId, spec: oneD.spec, fileSpec: oneD.spec, specHistory: [] })
     window.__shmooDemo = { dataset: oneD, site: oneD.sites[0] }
     dataset = oneD
   }
@@ -545,6 +663,23 @@ export async function maybeLoadDemo(): Promise<void> {
   const form = params.get('form')
   if (form === 'band' || form === 'curve') {
     useAppStore.setState({ oneDForm: form })
+  }
+
+  // 阶段 ⑥：用与界面输入等价的路径应用一份 spec（走 store.applySpec，真实重算判定）
+  // 截图用途下先等入场动画结束，避免截到 stagger 只揭示一半的中间帧
+  const specParam = params.get('spec')
+  if (specParam) {
+    try {
+      const { parseSpecValue } = await import('@shared/csv/metadata')
+      await new Promise<void>((resolve) => setTimeout(resolve, 900))
+      useAppStore.getState().applySpec(parseSpecValue(specParam))
+      // 等 React + 画布完成一次重绘再继续截图流程
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      )
+    } catch (err) {
+      console.warn('[demo] spec 参数非法，已忽略', specParam, err)
+    }
   }
 
   // 二值配色已在阶段 ③c 定稿为 A′（青绿 PASS / 正红 FAIL），不再提供版本切换参数
@@ -586,5 +721,11 @@ export async function maybeLoadDemo(): Promise<void> {
   // 交互层耗时探针：放在最后，保证前面的演示状态（lock/box/slice）不会干扰测量
   if (params.get('interaction-perf') === '1') {
     await runInteractionProbe(dataset)
+  }
+
+  // 阶段 ⑥ spec 重算 + 重绘耗时：读取 store 里的最新 dataset（可能已被 spec 参数改过）
+  if (params.get('spec-perf') === '1') {
+    const current = useAppStore.getState().dataset ?? dataset
+    await runSpecPerfProbe(current)
   }
 }

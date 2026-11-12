@@ -362,6 +362,8 @@ export function parseShmooCsv(
       // 无数据哨兵用 NaN，三态初值必须是 UNKNOWN（不能默认成 fail）
       value: new Float32Array(nx * ny).fill(Number.NaN),
       pass: new Uint8Array(nx * ny).fill(CELL_UNKNOWN),
+      // 保留 CSV pass 列的原始判定：阶段 ⑥ 改 spec 时据此复现「重新解析」的结果
+      sourcePass: new Uint8Array(nx * ny).fill(CELL_UNKNOWN),
       valueRange: null,
       knownCount: 0,
       passCount: 0
@@ -377,6 +379,8 @@ export function parseShmooCsv(
 
     const index = yi * nx + xi
     grid.value[index] = point.value
+    // 文件 pass 列原样留档（空 / 无法识别记为 UNKNOWN）
+    grid.sourcePass![index] = point.passToken ?? CELL_UNKNOWN
 
     let state: CellState
     if (valueType === 'passfail') {

@@ -984,6 +984,47 @@ select {
   border-color: var(--color-line-strong);
 }
 
+/* 阶段 ⑥：spec 输入校验失败时用数据语义红标出，不静默改值 */
+.field input.is-invalid,
+.field input.is-invalid:hover {
+  border-color: var(--color-fail);
+}
+
+.field__hint {
+  font-size: var(--text-2xs);
+  color: var(--color-text-disabled);
+}
+
+.panel__error {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--color-fail);
+  background: var(--color-fail-dim);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+  color: var(--color-text-primary);
+}
+
+.panel__actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.panel__actions .btn {
+  flex: 1;
+  height: 26px;
+  padding: 0 var(--space-2);
+  font-size: var(--text-2xs);
+}
+
+.btn:disabled,
+.btn:disabled:hover {
+  border-color: var(--color-line-subtle);
+  color: var(--color-text-disabled);
+  cursor: default;
+  transform: none;
+}
+
 .panel__divider {
   height: 1px;
   margin: var(--space-1) 0;

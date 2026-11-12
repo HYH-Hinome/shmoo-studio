@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
   CSSProperties,
   KeyboardEvent as ReactKeyboardEvent,
@@ -306,7 +306,14 @@ export function Shmoo2DChart({
     raf = window.requestAnimationFrame(tick)
     return () => window.cancelAnimationFrame(raf)
     // 尺寸从 0 变为有效值时也要启动；真正改变宽高不重新播放入场动画
-  }, [dataset.id, dataset.revision, site.siteId, mode, reducedMotion, size.width > 0, size.height > 0, repaint])
+  }, [dataset.id, site.siteId, mode, reducedMotion, size.width > 0, size.height > 0, repaint])
+
+  // 阶段 ⑥：spec 编辑只改变判定与 margin，不重播入场动画。
+  // 用 layout effect 在浏览器绘制前完成重绘，避免“旧图闪一帧”。
+  useLayoutEffect(() => {
+    if (dataset.revision <= 0) return
+    repaint('all')
+  }, [dataset.revision, repaint])
 
   // hover / 锁定 / 框选变化 → 只重绘交互层（静态层与边界层完全不碰）
   useEffect(() => {
