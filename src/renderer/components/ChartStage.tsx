@@ -25,8 +25,6 @@ export function ChartStage(): JSX.Element {
   const setColorMode = useAppStore((s) => s.setColorMode)
   const oneDForm = useAppStore((s) => s.oneDForm)
   const setOneDForm = useAppStore((s) => s.setOneDForm)
-  const renderMode = useAppStore((s) => s.renderMode)
-  const setRenderMode = useAppStore((s) => s.setRenderMode)
   const ambientMotion = useAppStore((s) => s.ambientMotion)
   const setAmbientMotion = useAppStore((s) => s.setAmbientMotion)
   const slice = useAppStore((s) => s.slice)
@@ -213,38 +211,17 @@ export function ChartStage(): JSX.Element {
             </>
           )}
         </div>
-        {/* 第三组只服务 2D：着色方式 + 氛围动效开关。
-            两者都是同高 28px 的控件，切换时绘图区宽度/高度不受影响。 */}
+        {/* 第三组只服务 2D：氛围动效开关（同高 28px，不影响绘图区尺寸） */}
         {render2D && !sliceView ? (
-          <>
-            <div className="segmented" role="group" aria-label="2D 着色方式">
-              <button
-                type="button"
-                className={renderMode === 'ink' ? 'is-active' : undefined}
-                title="有机墨迹轮廓 + 点阵坐标参考（默认）"
-                onClick={() => setRenderMode('ink')}
-              >
-                墨迹
-              </button>
-              <button
-                type="button"
-                className={renderMode === 'cell' ? 'is-active' : undefined}
-                title="逐格实心填充，用于精确定位单个点"
-                onClick={() => setRenderMode('cell')}
-              >
-                逐格
-              </button>
-            </div>
-            <button
-              type="button"
-              className={`toggle${ambientMotion ? ' is-active' : ''}`}
-              aria-pressed={ambientMotion}
-              title="FAIL 辉光呼吸 + 轮廓噪声缓慢流动（默认关闭）"
-              onClick={() => setAmbientMotion(!ambientMotion)}
-            >
-              氛围动效
-            </button>
-          </>
+          <button
+            type="button"
+            className={`toggle${ambientMotion ? ' is-active' : ''}`}
+            aria-pressed={ambientMotion}
+            title="边界线轻微呼吸 + 图区噪点缓慢流动（默认关闭）"
+            onClick={() => setAmbientMotion(!ambientMotion)}
+          >
+            氛围动效
+          </button>
         ) : null}
         <div className="stage__spacer" />
         {activeSite ? <span className="stage__badge">{activeSite.siteLabel}</span> : null}
@@ -324,7 +301,6 @@ export function ChartStage(): JSX.Element {
               xAxis={dataset.xAxis}
               yAxis={dataset.yAxis}
               mode={effectiveColorMode}
-              renderMode={renderMode}
               ambientMotion={ambientMotion}
               sliceMarker={sliceMarker}
               onSlice={openSlice}

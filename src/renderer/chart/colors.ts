@@ -26,20 +26,20 @@ export interface BinaryPalette {
 }
 
 /**
- * 定稿二值配色 A′：PASS 青绿 + FAIL 正红，两者都做 margin 明度调制。
+ * 二值配色（苹果风低饱和版）：PASS 青绿 + FAIL 红，两者都做 margin 明度调制。
  *
- * 色相取舍：
- *  - PASS #26968a：与热力色带冷段同源的青绿，远离“Excel 绿”；
- *  - FAIL #c0453e：偏正的红（H≈2°），不枣红（明度太低）、不荧光（饱和度太高）、不橙红（H>15°）；
- *    琥珀在工程语境里容易被读成“警示黄”，且会和热力暖端混淆，因此定稿改为正红；
- *  - 两端暗色由同色相压暗得到（#0c1e1e / #1f0c0b），保证暗格仍能分辨红/青，不会发灰。
+ * 色相取舍（在保留“青绿=通过 / 红=失效”语义的前提下压低饱和度、掺一点灰）：
+ *  - PASS #3d8b80：带灰的青绿，比纯青色更接近 macOS 系统色里的“mint/teal”；
+ *  - FAIL #b5564f：偏灰的砖红，不荧光、不发紫，和 PASS 并排时仍一眼可分；
+ *  - 暗端仍是同色相压暗（#142523 / #2a1614），保证贴近 spec 的暗格仍能分辨红/青，
+ *    不会因为降饱和而糊成同一片灰。
  */
 export const BINARY_PALETTE: BinaryPalette = {
-  passAnchor: '#26968a',
-  passShadow: '#0c1e1e',
-  failAnchor: '#c0453e',
-  failShadow: '#1f0c0b',
-  unknownBase: '#0d1520'
+  passAnchor: '#3d8b80',
+  passShadow: '#142523',
+  failAnchor: '#b5564f',
+  failShadow: '#2a1614',
+  unknownBase: '#0e1620'
 }
 
 /** 明度调制的最暗系数：0 表示完全贴合暗端，1 表示完全贴合锚点 */
@@ -68,7 +68,6 @@ export const HEAT_STOPS: ReadonlyArray<{ t: number; color: string }> = [
 export const CHART_STRUCTURE = {
   canvasBg: '#070a0f',
   plotBg: '#0a0f16',
-  gridLine: 'rgba(4, 6, 10, 0.45)',
   axisLine: '#33465a',
   tickText: '#93a6ba',
   axisTitle: '#c3d1e0',
@@ -82,49 +81,26 @@ export const CHART_STRUCTURE = {
   crosshairSoft: 'rgba(56, 207, 224, 0.18)',
   hoverBorder: '#6fe3ef',
   boundary: 'rgba(230, 238, 247, 0.52)',
-  /** 墨迹模式的精确边界：1px 极淡白线，只做判读基准，不做装饰 */
-  exactBoundary: 'rgba(230, 238, 247, 0.26)',
-  /** 墨迹模式的坐标参考点阵：1 设备像素、5% 白 */
-  dotLattice: 'rgba(255, 255, 255, 0.05)',
   /** 背景 vignette：≤1.2%，且只画在色块之前 */
   vignette: 'rgba(0, 0, 0, 0.012)'
 } as const
 
 /**
- * 墨迹模式的“仪器色”层次：同色相的高光 / 基色 / 阴影。
+ * 纯二值数据的平涂配色（无连续测量值，margin 不可用）。
  *
- * 目的不是换色相，而是把原来平涂的饱和色块拆成三段明度，
- * 让大块 FAIL/PASS 区域有金属/玻璃仪表的纵深。红仍是红、青绿仍是青绿。
+ * 既然没有“余量”可表达，就不做明度调制：整片用同一支饱和色平涂，
+ * 取 iOS 系统色的红/绿（#FF3B30 / #34C759），在深色背景上足够醒目但不刺眼。
  */
-export interface InkTone {
-  /** 区域顶部的高光（比锚点略亮、略降饱和） */
-  highlight: string
-  /** 中段基色 */
-  base: string
-  /** 底部阴影 */
-  shadow: string
-  /** 墨迹外缘描边（很淡，给形状一点“墨”的厚度） */
-  edge: string
-}
+export const PASSFAIL_PALETTE = {
+  pass: '#34C759',
+  fail: '#FF3B30'
+} as const
 
-const INK_TONES: Record<'pass' | 'fail', InkTone> = {
-  pass: {
-    highlight: '#3aa79a',
-    base: '#1d746b',
-    shadow: '#0a2422',
-    edge: 'rgba(58, 167, 154, 0.30)'
-  },
-  fail: {
-    highlight: '#c65a51',
-    base: '#8b3630',
-    shadow: '#280f0d',
-    edge: 'rgba(198, 90, 81, 0.34)'
-  }
-}
-
-/** 取墨迹层次色；state 只能是 pass / fail（未知格不走墨迹） */
-export function inkTone(state: 'pass' | 'fail'): InkTone {
-  return INK_TONES[state]
+/** 纯二值数据取色；未知格仍然回到缺测底色，不参与红绿判定 */
+export function passFailColor(state: number): string {
+  if (state === 1) return PASSFAIL_PALETTE.pass
+  if (state === 0) return PASSFAIL_PALETTE.fail
+  return BINARY_PALETTE.unknownBase
 }
 
 /** #rrggbb → [r,g,b] */

@@ -131,6 +131,20 @@ export function isHeatMeaningful(dataset: ShmooDataset): boolean {
 }
 
 /**
+ * 是否为“纯二值”数据集（没有连续量可表达）。
+ *
+ * 判定口径（数据集级，解析后一次性决定，不在渲染里逐格判断）：
+ *  - 文件声明了 value_type: passfail；或
+ *  - 整个值域只有 1–2 种取值（典型是 0/1 pattern，即使声明成 measured）。
+ *
+ * 这类数据没有 |margin| 的连续含义，二值色块应改为饱和平涂（iOS 系统红绿），
+ * 图例也随之切换成“二值判定”。纯粹是显示层判断，不影响解析与判定结果。
+ */
+export function isFlatBinaryDataset(dataset: ShmooDataset): boolean {
+  return dataset.valueType === 'passfail' || !isHeatMeaningful(dataset)
+}
+
+/**
  * margin 是否有物理意义（决定规格面板显示数字还是“不适用”）。
  *
  * 以下情况 margin 只是形式上的数字、容易误导：

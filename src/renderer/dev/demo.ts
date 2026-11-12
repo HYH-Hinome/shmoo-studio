@@ -250,10 +250,10 @@ function runBench(dataset: ShmooDataset, grid = 0): void {
     valueLabel: dataset.valueLabel,
     valueUnit: dataset.valueUnit,
     mode: 'binary' as const,
-    // 压测墨迹模式：这是默认视觉，也是最重的一条路径（轮廓路径 + 点阵 + 噪点）
-    renderMode: 'ink' as const,
+    // 合成网格是连续值：保留 margin 明度调制这条真实路径
+    flatBinary: false,
     tint: computeMarginTints(site, dataset.spec),
-    motion: { enabled: false, delaySpan: 0, cellDuration: 0, elapsed: 0 }
+    motion: { enabled: false, elapsed: 0 }
   }
 
   // 预热 5 次（首次会做字体测量与路径构建），不计入结果
@@ -293,8 +293,62 @@ export async function maybeLoadDemo(): Promise<void> {
   const sampleRaw = params.get('sample')
   const sample: DemoSample =
     sampleRaw === '1d' || sampleRaw === 'window' || sampleRaw === 'pattern' ? sampleRaw : '2d'
-  const dataset = await loadDemoDataset(sample)
+  let dataset = await loadDemoDataset(sample)
   if (!dataset) return
+
+  // 合成网格显示：?demo=1&grid=100
+  // 100×100 这类小尺寸下，圆角半径会自适应收紧、格缝是否还看得见，必须用真实网格验证。
+  // 这里把样例的轴与站点替换为合成数据（与压测共用 syntheticSite），
+  // 渲染链路完全不变；标题里标注“合成”，避免截图被误认为真实样例。
+  const gridParam = Number.parseInt(params.get('grid') ?? '0', 10)
+  if (Number.isFinite(gridParam) && gridParam > 0 && dataset.kind === '2d' && dataset.yAxis) {
+    const gridSite = syntheticSite(gridParam, gridParam)
+    const synthetic = {
+      ...dataset,
+      title: `${dataset.title} · 合成 ${gridParam}×${gridParam}`,
+      xAxis: { ...dataset.xAxis, values: Array.from({ length: gridParam }, (_, i) => i) },
+      yAxis: { ...dataset.yAxis, values: Array.from({ length: gridParam }, (_, j) => j) },
+      sites: [gridSite]
+    }
+    useAppStore.setState({ dataset: synthetic, activeSiteId: gridSite.siteId })
+    // 自检脚本读的是 window 上的引用，必须同步替换，否则像素断言会按 30×30 的几何去取样
+    window.__shmooDemo = { dataset: synthetic, site: gridSite }
+    dataset = synthetic
+  }
+
+  // 1D 二值样例：?demo=1&sample=pattern&row1d=12
+  // 现有样例里没有“1D 二值”数据，切片视图又固定画曲线（form 被强制为 curve），
+  // 所以这里把 2D 的指定行抽成真正的 1D 数据集，用来验证“1D 色带 + 饱和平涂”。
+  const row1d = Number.parseInt(params.get('row1d') ?? '', 10)
+  if (Number.isInteger(row1d) && dataset.kind === '2d' && dataset.yAxis) {
+    const nx = dataset.xAxis.values.length
+    const ny = dataset.yAxis.values.length
+    const row = row1d >= 0 && row1d < ny ? row1d : 0
+    const source = dataset.sites[0]
+    const value = new Float32Array(nx)
+    const pass = new Uint8Array(nx)
+    let knownCount = 0
+    let passCount = 0
+    for (let ix = 0; ix < nx; ix++) {
+      const index = row * nx + ix
+      value[ix] = source.value[index]
+      pass[ix] = source.pass[index]
+      if (pass[ix] !== CELL_UNKNOWN) {
+        knownCount++
+        if (pass[ix] === CELL_PASS) passCount++
+      }
+    }
+    const oneD = {
+      ...dataset,
+      kind: '1d' as const,
+      title: `${dataset.title} · 第 ${row} 行`,
+      yAxis: null,
+      sites: [{ ...source, value, pass, valueRange: source.valueRange, knownCount, passCount }]
+    }
+    useAppStore.setState({ dataset: oneD, activeSiteId: oneD.sites[0].siteId })
+    window.__shmooDemo = { dataset: oneD, site: oneD.sites[0] }
+    dataset = oneD
+  }
 
   const mode = params.get('mode')
   if (mode === 'heat' || mode === 'binary') {

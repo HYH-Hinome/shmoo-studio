@@ -6,6 +6,7 @@ import { DEFAULT_PADDING, cellCenter, computeGeometry, tickDecimals } from '../c
 import { drawOneDInteraction, drawOneDStatic } from '../chart/render1d'
 import type { OneDForm, OneDMotion } from '../chart/render1d'
 import { computeMarginTints } from '../chart/colors'
+import { isFlatBinaryDataset } from '@shared/spec/evaluate'
 import { nearestSampleIndex } from '../chart/oneD'
 import type { ChartPerf } from '../chart/perf'
 import { useLayeredCanvas } from '../chart/useLayeredCanvas'
@@ -86,6 +87,10 @@ export function Shmoo1DChart({ dataset, site, form }: Shmoo1DChartProps): JSX.El
     [site, dataset.spec, dataset.revision]
   )
 
+  // 纯二值数据集（0/1 pattern / 无 value）：色带与曲线点改用饱和平涂系统色。
+  // 数据集级一次性判定，绘制函数只读布尔值，不逐点判断。
+  const flatBinary = useMemo(() => isFlatBinaryDataset(dataset), [dataset])
+
   const renderers = useMemo<Record<LayerName, LayerRenderer>>(() => {
     return {
       static: (ctx, size) => {
@@ -95,6 +100,7 @@ export function Shmoo1DChart({ dataset, site, form }: Shmoo1DChartProps): JSX.El
           site,
           form: formRef.current,
           tint: marginTints,
+          flatBinary,
           motion: motionRef.current
         })
         perfRef.current.frames += 1
@@ -113,7 +119,7 @@ export function Shmoo1DChart({ dataset, site, form }: Shmoo1DChartProps): JSX.El
         recordTiming('interaction', performance.now() - startedAt)
       }
     }
-  }, [dataset, site, marginTints, recordTiming])
+  }, [dataset, site, marginTints, flatBinary, recordTiming])
 
   const { containerRef, canvasRefs, size, repaint } = useLayeredCanvas(renderers)
 

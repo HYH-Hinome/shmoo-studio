@@ -3,15 +3,14 @@ import { CELL_UNKNOWN } from '@shared/types/shmoo'
 import {
   BINARY_PALETTE,
   CHART_STRUCTURE,
+  PASSFAIL_PALETTE,
   binaryMarginColor,
   binarySwatchStops,
   heatGradientStops,
-  inkTone,
+  passFailColor,
   sampleHeatColor,
   valueToT
 } from './colors'
-import type { InkScene, Pt } from './contour'
-import { buildInkScene } from './contour'
 import {
   type ChartGeometry,
   type CellIndex,
@@ -24,26 +23,25 @@ import {
 /**
  * 2D Shmoo 的三层绘制实现（命令式 Canvas 2D，不含 React 状态）。
  *
- * 分层职责（视觉重做后）：
- *  - staticLayer：背景（含 vignette）→ 有机墨迹色块 / 逐格色块 → 未知格斜纹
- *    → 点阵坐标参考 → 噪点纹理 → 数据区边框 → 切片标记 → 坐标轴 → 图例；
- *  - boundaryLayer：FAIL 区精确边界（墨迹模式）+ 可选的氛围辉光/噪声流动；
+ * 分层职责：
+ *  - staticLayer：背景（含 vignette）→ 圆角色块 → 噪点纹理 → 数据区边框
+ *    → 切片标记 → 坐标轴 → 图例；
+ *  - boundaryLayer：pass/fail 阶梯边界 + 可选的氛围动效；
  *  - interactionLayer：十字准线 + hover 格描边 + 涟漪，每帧只清这一层。
  *
+ * 视觉方向（圆角单元格）：
+ *  - 每格是圆角矩形，格间留 1 逻辑像素缝，露出画布底色形成细网格；
+ *  - 圆角半径随格子尺寸自适应（见 CELL_RADIUS_RATIO / cellCornerRadius），
+ *    30×30 时圆角明显，100×100 时收成近方角，不会糊成圆点；
+ *  - 格子足够大时叠一条极淡的顶部高光，制造很轻的立体感（不做拟物按钮）。
+ *
  * 性能约束：
- *  - 轮廓提取与噪声位移按数据集缓存（contour.ts 内部 WeakMap），不逐帧重算；
- *  - 逐格填充全部用 fillRect；点阵用一个 Path2D 一次性填充；
- *  - 静态层只在数据/尺寸/模式变化时重绘，默认状态完全静止。
+ *  - 静态层只在数据/尺寸/配色变化时重绘，默认状态完全静止；
+ *  - 每格一次 roundRect + fill，未知格另加斜纹；
+ *  - 边界层与交互层都很轻，氛围动效只重绘边界层并降帧。
  */
 
 export type ChartColorMode = 'binary' | 'heat'
-
-/**
- * 二值模式的两种着色方式：
- *  - ink：默认。取消逐格实心填充，用有机墨迹轮廓上色，背景给点阵坐标参考；
- *  - cell：逐格。每格独立填充，用于精确定位单点、确认稀疏数据里某一格的状态。
- */
-export type ChartRenderMode = 'ink' | 'cell'
 
 /** 画布尺寸（CSS 像素）与设备像素比 */
 export interface CanvasSize {
@@ -61,6 +59,12 @@ export interface ChartDataInput {
   valueLabel: string
   valueUnit: string
   mode: ChartColorMode
+  /**
+   * 是否为纯二值数据集（组件层 useMemo 一次判定，见 isFlatBinaryDataset）：
+   *  - false（默认）：连续测量值，二值模式用 margin 明度调制；
+   *  - true：0/1 pattern 或 passfail 数据，没有连续量，改用饱和平涂系统色。
+   */
+  flatBinary?: boolean
   /** 每个格子的 |margin| 归一化值（0–1）；null 表示无法计算，按 0.5 兜底 */
   tint: Float32Array | null
 }
@@ -69,10 +73,6 @@ export interface ChartDataInput {
 export interface MotionInput {
   /** 是否播放动画；prefers-reduced-motion 时为 false */
   enabled: boolean
-  /** 从左上到右下的延迟跨度 */
-  delaySpan: number
-  /** 单个色块的淡入时长 */
-  cellDuration: number
   /** 动画已进行的时间（ms）；enabled=false 时忽略 */
   elapsed: number
 }
@@ -80,8 +80,6 @@ export interface MotionInput {
 /** 静态层绘制参数 */
 export interface StaticLayerInput extends ChartDataInput {
   motion: MotionInput
-  /** 二值模式的着色方式；默认 ink（有机墨迹） */
-  renderMode?: ChartRenderMode
   /**
    * 切片标记：从切片视图返回 2D 后仍然保留，提示“刚才看的是这一行/列”。
    * 只画虚线框 + 极淡提亮，不改变色块本身的读数。
@@ -136,25 +134,6 @@ function easeOutCubic(t: number): number {
 }
 
 /**
- * 计算单个色块在当前动画时刻的不透明度。
- * 对角线顺序：delay 与 (ix+iy) 成正比；动画关闭时恒为 1（瞬显）。
- */
-export function cellAlpha(
-  ix: number,
-  iy: number,
-  nx: number,
-  ny: number,
-  motion: MotionInput
-): number {
-  if (!motion.enabled) return 1
-  const diagonal = nx + ny - 2
-  const order = diagonal <= 0 ? 0 : (ix + iy) / diagonal
-  const startedAt = order * motion.delaySpan
-  if (motion.elapsed <= startedAt) return 0
-  return easeOutCubic((motion.elapsed - startedAt) / motion.cellDuration)
-}
-
-/**
  * 在指定矩形内画 45° 斜纹（缺失点填充）。
  *
  * 为什么不用 CanvasPattern：pattern 的平铺原点落在设备像素网格上，
@@ -185,58 +164,64 @@ export function drawCellHatch(
   ctx.stroke()
 }
 
-/** 墨迹入场：按到图心距离分成 6 层，每层间隔 30ms，同层一起点亮 */
-export const INK_LAYER_COUNT = 6
-export const INK_LAYER_DELAY = 30
-const INK_LAYER_DURATION = 240
+/** 入场：按到图心距离分 6 层，每层间隔 30ms，同层批量点亮 */
+export const ENTRANCE_LAYER_COUNT = 6
+export const ENTRANCE_LAYER_DELAY = 30
+const ENTRANCE_LAYER_DURATION = 240
+/** 入场总时长：最后一层的开始时间 + 淡入时长，用于收尾与边界层延时 */
+export const ENTRANCE_TOTAL =
+  (ENTRANCE_LAYER_COUNT - 1) * ENTRANCE_LAYER_DELAY + ENTRANCE_LAYER_DURATION
 
 /**
- * 墨迹层的入场不透明度。
- * 与逐格模式的对角线顺序不同：整块区域按层批量出现，避免大图逐格串行导致总时长失控。
+ * 计算单个色块在当前动画时刻的不透明度。
+ *
+ * 分层口径：把“到网格中心的归一化距离”均分成 6 层，同层格子同时亮起。
+ * 为什么不做逐格串行：100×100 时逐格延迟会让总时长失控；分层后总时长恒定约 390ms，
+ * 且视觉上是从中心向外一圈圈点亮，符合“仪器扫描”的感觉。
+ * 动画关闭（prefers-reduced-motion 或首帧前）时恒为 1，静态首帧即最终画面。
  */
-export function inkLayerAlpha(layer: number, motion: MotionInput): number {
+export function cellAlpha(
+  ix: number,
+  iy: number,
+  nx: number,
+  ny: number,
+  motion: MotionInput
+): number {
   if (!motion.enabled) return 1
-  const startedAt = layer * INK_LAYER_DELAY
+  // 单格网格没有“距离”可言，直接归到第 0 层
+  const halfX = (nx - 1) / 2
+  const halfY = (ny - 1) / 2
+  const maxDist = Math.hypot(halfX, halfY)
+  const distance = maxDist > 0 ? Math.hypot(ix - halfX, iy - halfY) / maxDist : 0
+  const layer = Math.min(ENTRANCE_LAYER_COUNT - 1, Math.floor(distance * ENTRANCE_LAYER_COUNT))
+  const startedAt = layer * ENTRANCE_LAYER_DELAY
   if (motion.elapsed <= startedAt) return 0
-  return easeOutCubic((motion.elapsed - startedAt) / INK_LAYER_DURATION)
+  return easeOutCubic((motion.elapsed - startedAt) / ENTRANCE_LAYER_DURATION)
 }
 
-/** 用折线构造闭合路径；points 可能带重复的收尾点，这里统一 closePath */
-function tracePath(target: CanvasRenderingContext2D | Path2D, points: Pt[]): void {
-  if (points.length < 3) return
-  target.moveTo(points[0].x, points[0].y)
-  for (let i = 1; i < points.length; i++) target.lineTo(points[i].x, points[i].y)
-  target.closePath()
+/** 格间缝隙：1 逻辑像素（DPR=2 时正好 2 设备像素），缝里露出画布底色形成细网格 */
+export const CELL_GAP = 1
+/** 圆角半径占短边的比例 */
+export const CELL_RADIUS_RATIO = 0.18
+/** 圆角上下限（逻辑像素）：太大格会变胶囊，太小格会糊成圆点 */
+export const CELL_RADIUS_MIN = 1.5
+export const CELL_RADIUS_MAX = 5
+
+/**
+ * 自适应圆角半径。
+ *
+ * 半径按“去掉缝隙后的短边”计算，并夹到 1.5–5：
+ *  - 30×30（短边约 23px）→ 约 4.1px，圆角明显、有 iOS 卡片的观感；
+ *  - 100×100（短边约 6.5px）→ 理论值 1.17px，夹到 1.5px，趋向小圆角，不会糊成圆点。
+ */
+export function cellCornerRadius(innerW: number, innerH: number): number {
+  const short = Math.min(innerW, innerH)
+  if (!Number.isFinite(short) || short <= 0) return 0
+  return Math.max(CELL_RADIUS_MIN, Math.min(CELL_RADIUS_MAX, short * CELL_RADIUS_RATIO))
 }
 
-/** 取轮廓场景（contour.ts 内部按数据集缓存，重复调用不会重算） */
-function sceneFor(input: ChartDataInput): InkScene {
-  return buildInkScene(input.geometry.x.edges, input.geometry.y.edges, input.site.pass)
-}
-
-/** 点阵坐标参考：每个格子中心 1 个设备像素点，rgba(255,255,255,0.05) */
-function drawDotLattice(ctx: CanvasRenderingContext2D, size: CanvasSize, geometry: ChartGeometry): void {
-  const { dpr } = size
-  const { plot } = geometry
-  const nx = geometry.x.values.length
-  const ny = geometry.y.values.length
-  const dot = 1 / dpr
-
-  const path = new Path2D()
-  for (let iy = 0; iy < ny; iy++) {
-    for (let ix = 0; ix < nx; ix++) {
-      const center = cellCenter(geometry, ix, iy)
-      // 对齐设备像素，保证 1 像素点清晰、不发灰
-      const x = Math.round(center.x * dpr) / dpr
-      const y = Math.round(center.y * dpr) / dpr
-      path.rect(x - dot / 2, y - dot / 2, dot, dot)
-    }
-  }
-  ctx.fillStyle = CHART_STRUCTURE.dotLattice
-  ctx.fill(path)
-  // plot 仅用于语义提示：点阵严格覆盖数据区，不越过边框
-  void plot
-}
+/** 顶部高光的最小短边要求：格子太小时高光不足 1px，画了也只会发灰，直接跳过 */
+const HIGHLIGHT_MIN_SHORT = 7
 
 /**
  * 极淡径向 vignette（最大 1.2%）。
@@ -307,119 +292,43 @@ function drawNoiseOverlay(ctx: CanvasRenderingContext2D, geometry: ChartGeometry
 }
 
 /**
- * 墨迹模式：把 PASS / FAIL 连通区画成有层次的色块。
+ * 圆角单元格：每格是一个圆角矩形，格间留 1px 缝露出画布底色。
  *
- * 画法顺序（保证“硬边 + 柔和墨迹压在外面”）：
- *  1. 用墨迹轮廓填充高光→阴影的竖向渐变（有仪器金属感的基础层）；
- *  2. 用同一路径裁剪，逐格叠加 A′ 的 margin 明度色 —— 保留原来的判读编码；
- *  3. 精确的 1px 边界由 boundary 层负责，不在这里画。
+ * 统一用于二值与热力两种配色：
+ *  1. 圆角半径按格子的实际短边自适应（100×100 时自动收紧，不会糊成圆点）；
+ *  2. 二值模式保留 margin 明度调制（越贴 spec 越暗），热力模式用连续色带；
+ *  3. 缺失格换成深底 + 45° 斜纹，表达“未测”而不是“失败”；
+ *  4. 格子足够大时，在顶部内侧叠一条 1 设备像素的白线（约 5%），
+ *     只是让平涂有一点受光感，不做内阴影/渐变，避免变成拟物按钮。
  */
-function drawInkRegions(
-  ctx: CanvasRenderingContext2D,
-  input: StaticLayerInput,
-  scene: InkScene,
-  dpr: number
-): void {
-  const { geometry, site, motion, tint } = input
-  const { plot } = geometry
-  const nx = geometry.x.values.length
-  const centerX = plot.x + plot.w / 2
-  const centerY = plot.y + plot.h / 2
-  const maxDist = Math.max(1, Math.hypot(plot.w, plot.h) / 2)
-
-  for (const region of scene.regions) {
-    const distance = Math.hypot(region.anchor.x - centerX, region.anchor.y - centerY)
-    const layer = Math.min(INK_LAYER_COUNT - 1, Math.floor((distance / maxDist) * INK_LAYER_COUNT))
-    const alpha = inkLayerAlpha(layer, motion)
-    if (alpha <= 0.002) continue
-
-    const tone = inkTone(region.state)
-    // 每个连通区一条路径：多个环（外轮廓 + 孔洞）一次填充，避免环之间出现接缝
-    const shape = new Path2D()
-    region.exactLoops.forEach((exact, index) => {
-      const ink = region.inkLoops[index]
-      const points = ink ?? exact
-      // 路径上每个环各自 moveTo，避免不同环被连成一条线
-      tracePath(shape, points)
-    })
-
-    ctx.save()
-    ctx.globalAlpha = alpha
-
-    const gradient = ctx.createLinearGradient(0, plot.y, 0, plot.y + plot.h)
-    gradient.addColorStop(0, tone.highlight)
-    gradient.addColorStop(0.42, tone.base)
-    gradient.addColorStop(1, tone.shadow)
-    ctx.fillStyle = gradient
-    ctx.fill(shape)
-    ctx.strokeStyle = tone.edge
-    ctx.lineWidth = 1
-    ctx.stroke(shape)
-
-    // 在墨迹形状内叠加逐格 margin 明度，保证“亮 = 更结实”的编码不丢失
-    ctx.clip(shape)
-    for (const index of region.cells) {
-      const ix = index % nx
-      const iy = (index - ix) / nx
-      const state = site.pass[index]
-      if (state === CELL_UNKNOWN) continue
-      const m = tint ? tint[index] : 0.5
-      const rect = cellRect(geometry, ix, iy)
-      ctx.fillStyle = binaryMarginColor(state, m)
-      // 0.58 让底层的渐变在高光/阴影方向透出更多，逐格的 margin 明度只作为“轻微起伏”，
-      // 不再形成一眼可见的方格拼布（0.82 时整片区域会像贴了瓷砖，和“有机墨迹”冲突）。
-      ctx.globalAlpha = alpha * 0.58
-      // 对齐到设备像素：相邻格共享同一条像素边界，避免 +0.5 重叠导致的重叠处二次叠加，
-      // 那样会在整片色块里透出规则的方格缝（放大看就是“拼布”）。
-      const left = snap(rect.x, dpr)
-      const top = snap(rect.y, dpr)
-      const right = snap(rect.x + rect.w, dpr)
-      const bottom = snap(rect.y + rect.h, dpr)
-      ctx.fillRect(left, top, right - left, bottom - top)
-    }
-
-    ctx.restore()
-  }
-}
-
-/** 未知格：深底 + 45° 斜纹；墨迹模式下必须盖在墨迹之上，表达“没有数据” */
-function drawUnknownCells(
-  ctx: CanvasRenderingContext2D,
-  size: CanvasSize,
-  input: StaticLayerInput
-): void {
-  const { geometry, site, motion } = input
-  const { dpr } = size
-  const nx = geometry.x.values.length
-  const ny = geometry.y.values.length
-
-  for (let iy = 0; iy < ny; iy++) {
-    for (let ix = 0; ix < nx; ix++) {
-      const index = iy * nx + ix
-      if (site.pass[index] !== CELL_UNKNOWN) continue
-      const alpha = cellAlpha(ix, iy, nx, ny, motion)
-      if (alpha <= 0.002) continue
-
-      const rect = cellRect(geometry, ix, iy)
-      const left = snap(rect.x, dpr)
-      const top = snap(rect.y, dpr)
-      const right = snap(rect.x + rect.w, dpr)
-      const bottom = snap(rect.y + rect.h, dpr)
-      ctx.globalAlpha = alpha
-      ctx.fillStyle = BINARY_PALETTE.unknownBase
-      ctx.fillRect(left, top, right - left, bottom - top)
-      drawCellHatch(ctx, left, top, right - left, bottom - top)
-    }
-  }
-  ctx.globalAlpha = 1
-}
-
-/** 逐格模式：每格独立填充（原 A′ 视觉，保留给精确判读） */
 function drawCells(ctx: CanvasRenderingContext2D, size: CanvasSize, input: StaticLayerInput): void {
   const { geometry, site, mode, motion, tint } = input
   const { dpr } = size
   const nx = geometry.x.values.length
   const ny = geometry.y.values.length
+  const halfGap = CELL_GAP / 2
+  // 直接读几何边界数组，省掉每格一次 cellRect 对象分配（100×100 时是 1 万次）。
+  // 注意必须用 edges 而不是 plot.w/nx：几何约定「行 0 在底部」（y.edges 递减），
+  // 且轴可能是非均匀采样，用等分公式会既上下镜像、又把非均匀格子画歪。
+  const xEdges = geometry.x.edges
+  const yEdges = geometry.y.edges
+  const animated = motion.enabled
+
+  // 按“颜色 + 不透明度”分组批量填充：静态状态（动画结束后）通常只有几十~几百组，
+  // 每组一次 fill，避免 1 万次 fillStyle 切换。100×100 逐格 flush 实测中位约 10ms，
+  // 分组后回落到 8ms 红线以内。入场动画期间每格 alpha 不同，退回逐格绘制。
+  const groups = new Map<string, { path: Path2D; color: string }>()
+  const highlights = new Map<string, Path2D>()
+
+  const cellColor = (index: number, state: number, value: number): string => {
+    if (mode !== 'binary') return sampleHeatColor(valueToT(value, site.valueRange))
+    // 分支在数据层就定好（flatBinary 来自数据集级判定），渲染时只做一次判断：
+    //  - false：明度随 |margin| 变化（贴近 spec 更暗，远离更亮）；
+    //  - true：没有连续量可表达，整片平涂 iOS 系统色。
+    return input.flatBinary
+      ? passFailColor(state)
+      : binaryMarginColor(state, tint ? tint[index] : 0.5)
+  }
 
   for (let iy = 0; iy < ny; iy++) {
     for (let ix = 0; ix < nx; ix++) {
@@ -429,101 +338,114 @@ function drawCells(ctx: CanvasRenderingContext2D, size: CanvasSize, input: Stati
       const alpha = cellAlpha(ix, iy, nx, ny, motion)
       if (alpha <= 0.001) continue
 
-      const rect = cellRect(geometry, ix, iy)
-      // 四边都取整到设备像素，相邻色块共享同一条边界 → 不会出现发丝缝
-      const left = snap(rect.x, dpr)
-      const top = snap(rect.y, dpr)
-      const right = snap(rect.x + rect.w, dpr)
-      const bottom = snap(rect.y + rect.h, dpr)
+      // 缝宽固定 1 逻辑像素：两侧各内缩 0.5，相邻格之间自然留出 1px 底色。
+      // 这里不做设备像素取整——圆角本身需要抗锯齿，强行对齐反而会让缝宽忽大忽小。
+      const left = xEdges[ix]
+      const right = xEdges[ix + 1]
+      const bottom = yEdges[iy]
+      const top = yEdges[iy + 1]
+      const x = left + halfGap
+      const y = top + halfGap
+      const w = right - left - CELL_GAP
+      const h = bottom - top - CELL_GAP
+      if (w <= 0.5 || h <= 0.5) continue
 
-      ctx.globalAlpha = alpha
+      const radius = cellCornerRadius(w, h)
 
+      // 缺失点：深底 + 45° 斜纹（裁剪到圆角内，边缘仍然干净）；数量通常极少，逐格画
       if (state === CELL_UNKNOWN || !Number.isFinite(value)) {
-        // 缺失点：深底 + 45° 斜纹，表达“未测”而不是“失败”
-        const w = right - left
-        const h = bottom - top
+        ctx.globalAlpha = alpha
         ctx.fillStyle = BINARY_PALETTE.unknownBase
-        ctx.fillRect(left, top, w, h)
-        drawCellHatch(ctx, left, top, w, h)
-      } else if (mode === 'binary') {
-        // 定稿 A′：明度随 |margin| 变化（贴近 spec 更暗，远离更亮）
-        const m = tint ? tint[index] : 0.5
-        ctx.fillStyle = binaryMarginColor(state, m)
-        ctx.fillRect(left, top, right - left, bottom - top)
-      } else {
-        const t = valueToT(value, site.valueRange)
-        ctx.fillStyle = sampleHeatColor(t)
-        ctx.fillRect(left, top, right - left, bottom - top)
+        ctx.beginPath()
+        ctx.roundRect(x, y, w, h, radius)
+        ctx.fill()
+        ctx.save()
+        ctx.beginPath()
+        ctx.roundRect(x, y, w, h, radius)
+        ctx.clip()
+        drawCellHatch(ctx, x, y, w, h)
+        ctx.restore()
+        continue
       }
+
+      const color = cellColor(index, state, value)
+
+      if (!animated) {
+        // 静态状态：同色格子合到一个 Path2D，最后统一填充
+        let group = groups.get(color)
+        if (!group) {
+          group = { path: new Path2D(), color }
+          groups.set(color, group)
+        }
+        group.path.roundRect(x, y, w, h, radius)
+
+        // 极轻的顶部高光：格子太小时（100×100）直接跳过，避免糊成灰边
+        if (Math.min(w, h) >= HIGHLIGHT_MIN_SHORT) {
+          let hp = highlights.get('1')
+          if (!hp) {
+            hp = new Path2D()
+            highlights.set('1', hp)
+          }
+          hp.rect(x + radius, y + 0.75 / dpr, Math.max(0, w - radius * 2), 1 / dpr)
+        }
+        continue
+      }
+
+      // 入场中：每格 alpha 不同，逐格填充
+      ctx.globalAlpha = alpha
+      ctx.fillStyle = color
+      ctx.beginPath()
+      ctx.roundRect(x, y, w, h, radius)
+      ctx.fill()
     }
+  }
+
+  // 批量落盘：先色块，再统一叠高光（同一条路径一次填充）
+  ctx.globalAlpha = 1
+  for (const group of groups.values()) {
+    ctx.fillStyle = group.color
+    ctx.fill(group.path)
+  }
+  if (highlights.size > 0) {
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.05)'
+    for (const path of highlights.values()) ctx.fill(path)
   }
   ctx.globalAlpha = 1
 }
 
 
 /**
- * 绘制静态层：背景（含 vignette）→ 墨迹/逐格色块 → 缺测格斜纹
- *                → 点阵/网格 → 噪点 → 边框 → 切片标记 → 坐标轴 → 图例
+ * 绘制静态层：背景（含 vignette）→ 圆角色块 → 噪点 → 边框 → 切片标记 → 坐标轴 → 图例
  */
 export function drawStaticLayer(
   ctx: CanvasRenderingContext2D,
   size: CanvasSize,
   input: StaticLayerInput
 ): void {
-  const { geometry, mode, renderMode = 'ink' } = input
+  const { geometry } = input
   const { plot } = geometry
   const { dpr, width, height } = size
 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, width, height)
 
-  // 1. 画布底色：比面板更暗，让色块成为唯一视觉焦点
+  // 1. 画布底色：比面板更暗，让色块成为唯一视觉焦点；格缝露出的就是这层底色
   ctx.fillStyle = CHART_STRUCTURE.canvasBg
   ctx.fillRect(0, 0, width, height)
 
   if (plot.w <= 2 || plot.h <= 2) return
 
-  const nx = geometry.x.values.length
-  const ny = geometry.y.values.length
-  // 墨迹只用于二值模式：热力是连续场，没有“FAIL 连通区”这个概念
-  const useInk = mode === 'binary' && renderMode === 'ink'
-
   // 2. 背景层 vignette：必须在色块之前，保证不压在数据上（≤1.2%）
   drawVignette(ctx, geometry)
 
-  // 3. 色块
-  if (useInk) {
-    drawInkRegions(ctx, input, sceneFor(input), dpr)
-    // 未知格永远盖在墨迹上（墨迹不会侵入缺测格，但边界处仍需要斜纹表达“未测”）
-    drawUnknownCells(ctx, size, input)
-  } else {
-    drawCells(ctx, size, input)
-  }
+  // 3. 圆角色块（二值 / 热力共用一套画法，缺测格带斜纹）
+  drawCells(ctx, size, input)
 
-  // 4. 坐标参考：墨迹模式用 1px 点阵；逐格模式保留原来的矩阵网格线
-  if (useInk) {
-    drawDotLattice(ctx, size, geometry)
-  } else {
-    ctx.strokeStyle = CHART_STRUCTURE.gridLine
-    ctx.lineWidth = 1
-    ctx.beginPath()
-    for (let ix = 0; ix <= nx; ix++) {
-      const x = snap(geometry.x.edges[ix], dpr) + 0.5 / dpr
-      ctx.moveTo(x, plot.y)
-      ctx.lineTo(x, plot.y + plot.h)
-    }
-    for (let iy = 0; iy <= ny; iy++) {
-      const y = snap(geometry.y.edges[iy], dpr) + 0.5 / dpr
-      ctx.moveTo(plot.x, y)
-      ctx.lineTo(plot.x + plot.w, y)
-    }
-    ctx.stroke()
-  }
-
-  // 5. 整个数据区叠约 2% 噪点纹理（含墨迹与空白，模拟仪器屏幕的颗粒感）
+  // 4. 整个数据区叠约 2% 噪点纹理（模拟仪器屏幕的颗粒感）
   drawNoiseOverlay(ctx, geometry)
 
-  // 6. 数据区边框 + 当前站点高亮框（内缩 3px，青色细线，不抢色块）
+  // 5. 数据区边框 + 当前站点高亮框（内缩 3px，青色细线，不抢色块）
+
   ctx.strokeStyle = CHART_STRUCTURE.axisLine
   ctx.strokeRect(snap(plot.x, dpr) + 0.5 / dpr, snap(plot.y, dpr) + 0.5 / dpr, plot.w, plot.h)
   ctx.strokeStyle = CHART_STRUCTURE.activeFrame
@@ -750,6 +672,8 @@ function drawLegend(
       { state: 0, label: 'FAIL' },
       { state: 2, label: 'NO DATA', hatch: true }
     ]
+    // 纯二值数据没有 margin 可编码：色卡改为平涂系统色，说明文字换成“二值判定”
+    const flat = input.flatBinary === true
     rows.forEach((row, i) => {
       const y = y0 + 24 + i * 18
       if (row.hatch) {
@@ -757,6 +681,12 @@ function drawLegend(
         ctx.fillRect(x0, y - 5, 10, 10)
         // 与色块一致的斜纹示意：复用同一个描线函数，步长按 10px 小色卡缩小
         drawCellHatch(ctx, x0, y - 5, 10, 10, 4)
+      } else if (flat) {
+        ctx.fillStyle = row.state === 1 ? PASSFAIL_PALETTE.pass : PASSFAIL_PALETTE.fail
+        ctx.fillRect(x0, y - 5, 10, 10)
+        ctx.strokeStyle = 'rgba(147, 166, 186, 0.22)'
+        ctx.lineWidth = 0.5
+        ctx.strokeRect(x0 + 0.25, y - 4.75, 9.5, 9.5)
       } else {
         // 色卡画成“暗端 → 锚点”的竖向渐变，与主图的 margin 明度调制同源
         const stops = binarySwatchStops(row.state, 4)
@@ -775,10 +705,10 @@ function drawLegend(
       ctx.fillText(row.label, x0 + 16, y)
     })
 
-    // 说明图例的编码方式，避免把“亮 = 更结实”误读成“亮 = 更好/更差”
+    // 说明图例的编码方式：连续值解释明度，纯二值则注明判定口径
     ctx.fillStyle = CHART_STRUCTURE.legendMuted
     ctx.font = FONT_MONO_SMALL
-    ctx.fillText('明度 ∝ |margin|', x0, y0 + 24 + rows.length * 18 + 2)
+    ctx.fillText(flat ? '二值判定' : '明度 ∝ |margin|', x0, y0 + 24 + rows.length * 18 + 2)
     return
   }
 
@@ -833,15 +763,12 @@ function drawLegend(
 }
 
 /**
- * 边界层：精确边界 + （可选）氛围动效。
+ * 边界层：阶梯边界 + （可选）氛围动效。
  *
- * 墨迹模式：直接用 contour.ts 的**精确轮廓**（marching squares 输出，落在真实格子边界上）
- * 描 1px 极淡白线。它和静态层的墨迹形状是同一份数据源，但位置一格不差；
- * 视觉上形成“一条硬边 + 一层柔和墨迹压在外面”，而不是两条互相打架的线。
+ * 只画“相邻格状态不同”的 1px 极淡白线（横向/纵向各自独立），不平滑、不移位，
+ * 保证每一格的状态都能在放大时对得上；圆角造成的格缝不会影响这条边界的位置。
  *
- * 逐格模式：保留原来的“相邻状态不同即画边”的阶梯边界。
- *
- * 氛围动效（默认关闭）：FAIL 区辉光呼吸 + 轮廓噪声缓慢流动。
+ * 氛围动效（默认关闭）：边界线 4s 极轻呼吸 + 图区噪点缓慢平移。
  * 只在这一层重绘，不触碰静态层的色块，因此开启时仍然只有很小的绘制面积。
  */
 export function drawBoundaryLayer(
@@ -850,7 +777,7 @@ export function drawBoundaryLayer(
   input: StaticLayerInput,
   ambient?: AmbientInput | null
 ): void {
-  const { geometry, site, mode, motion, renderMode = 'ink' } = input
+  const { geometry, site, mode, motion } = input
   const { dpr, width, height } = size
   const { plot } = geometry
 
@@ -862,56 +789,16 @@ export function drawBoundaryLayer(
 
   const nx = geometry.x.values.length
   const ny = geometry.y.values.length
-  // 边界随色块一起淡入，略晚于最后一个色块出现，避免“框先于色块”
-  const alpha = motion.enabled ? Math.min(1, Math.max(0, (motion.elapsed - motion.delaySpan) / 320)) : 1
+  // 边界随色块一起淡入，等最后一层色块开始后再出现，避免“框先于色块”
+  const alpha = motion.enabled
+    ? Math.min(1, Math.max(0, (motion.elapsed - (ENTRANCE_TOTAL - 240)) / 320))
+    : 1
   if (alpha <= 0) return
 
   ctx.lineWidth = 1
   ctx.globalAlpha = alpha
 
-  if (renderMode === 'ink') {
-    const scene = sceneFor(input)
-    const failShape = new Path2D()
-    let hasFail = false
-    for (const region of scene.regions) {
-      if (region.state !== 'fail') continue
-      for (const loop of region.exactLoops) {
-        tracePath(failShape, loop)
-        hasFail = true
-      }
-    }
-
-    // 1px 精确边界：位置即数据边界，不做任何位移/平滑
-    ctx.strokeStyle = CHART_STRUCTURE.exactBoundary
-    ctx.stroke(failShape)
-
-    // —— 氛围动效：只在显式开启时绘制 ——
-    if (ambient && hasFail) {
-      const breathe = 0.5 + 0.5 * Math.sin(ambient.phase)
-      ctx.save()
-      ctx.globalCompositeOperation = 'lighter'
-      ctx.fillStyle = `rgba(192, 69, 62, ${(0.035 + breathe * 0.05).toFixed(4)})`
-      ctx.fill(failShape)
-      ctx.restore()
-
-      // 轮廓噪声流动：裁剪到 FAIL 形状内，平移噪点 pattern，不重建路径
-      const pattern = getNoisePattern(ctx)
-      if (pattern && typeof DOMMatrix !== 'undefined') {
-        const matrix = new DOMMatrix().translate(ambient.drift, ambient.drift * 0.6)
-        pattern.setTransform(matrix)
-        ctx.save()
-        ctx.clip(failShape)
-        ctx.globalAlpha = 0.06
-        ctx.fillStyle = pattern
-        ctx.fillRect(plot.x, plot.y, plot.w, plot.h)
-        ctx.restore()
-      }
-    }
-    ctx.globalAlpha = 1
-    return
-  }
-
-  // ---- 逐格模式：相邻状态不同的格子边界 ----
+  // ---- 相邻状态不同的格子边界（阶梯线，1px 低对比） ----
   const stateAt = (ix: number, iy: number): number => site.pass[iy * nx + ix]
   const known = (s: number) => s !== CELL_UNKNOWN
 
@@ -945,6 +832,29 @@ export function drawBoundaryLayer(
   }
 
   ctx.stroke()
+
+  // —— 氛围动效：只在显式开启时绘制，且只在 boundary 层 ——
+  // 效果一：边界线 4s 周期极轻呼吸（0.55→1 的透明度起伏）；
+  // 效果二：整个数据区叠一层缓慢平移的噪点（≤6%），像仪器屏幕的微光。
+  // 两者都很便宜：一次 stroke + 一次 pattern 填充，不重建几何。
+  if (ambient) {
+    const breathe = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(ambient.phase))
+    ctx.strokeStyle = CHART_STRUCTURE.boundary
+    ctx.globalAlpha = alpha * breathe
+    ctx.stroke()
+
+    const pattern = getNoisePattern(ctx)
+    if (pattern && typeof DOMMatrix !== 'undefined') {
+      const matrix = new DOMMatrix().translate(ambient.drift, ambient.drift * 0.6)
+      pattern.setTransform(matrix)
+      ctx.save()
+      ctx.globalAlpha = 0.06
+      ctx.fillStyle = pattern
+      ctx.fillRect(plot.x, plot.y, plot.w, plot.h)
+      ctx.restore()
+    }
+  }
+
   ctx.globalAlpha = 1
 }
 
@@ -1026,14 +936,21 @@ export function drawInteractionLayer(
   ctx.stroke()
   ctx.setLineDash([])
 
-  // 当前格描边：亮青色，1.5px，略向外扩 0.5px 让色块本身完整露出
+  // 当前格描边：亮青色，1.5px；跟随圆角单元格的形状（半径与填充一致），
+  // 外扩约 0.75px，保证描边压在格缝上而不是吃进色块。
   const rect = cellRect(geometry, hover.ix, hover.iy)
+  const inset = 0.75
+  const hw = Math.max(0, rect.w - CELL_GAP + inset * 2)
+  const hh = Math.max(0, rect.h - CELL_GAP + inset * 2)
   ctx.strokeStyle = CHART_STRUCTURE.hoverBorder
   ctx.lineWidth = 1.5
-  ctx.strokeRect(
-    snap(rect.x, dpr) - 0.75 / dpr,
-    snap(rect.y, dpr) - 0.75 / dpr,
-    snap(rect.x + rect.w, dpr) - snap(rect.x, dpr) + 1.5 / dpr,
-    snap(rect.y + rect.h, dpr) - snap(rect.y, dpr) + 1.5 / dpr
+  ctx.beginPath()
+  ctx.roundRect(
+    rect.x + CELL_GAP / 2 - inset,
+    rect.y + CELL_GAP / 2 - inset,
+    hw,
+    hh,
+    cellCornerRadius(rect.w - CELL_GAP, rect.h - CELL_GAP) + inset
   )
+  ctx.stroke()
 }

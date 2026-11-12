@@ -4,10 +4,11 @@ import type { Axis, ShmooDataset, SiteGrid } from '@shared/types/shmoo'
 import { CELL_FAIL, CELL_PASS } from '@shared/types/shmoo'
 import { DEFAULT_PADDING, cellCenter, computeGeometry, hitTest, tickDecimals } from '../chart/geometry'
 import type { CellIndex, ChartGeometry } from '../chart/geometry'
-import { drawBoundaryLayer, drawInteractionLayer, drawStaticLayer } from '../chart/render2d'
-import type { ChartColorMode, ChartRenderMode, MotionInput } from '../chart/render2d'
+import { drawBoundaryLayer, drawInteractionLayer, drawStaticLayer, ENTRANCE_TOTAL } from '../chart/render2d'
+import type { ChartColorMode, MotionInput } from '../chart/render2d'
 import type { SliceRef } from '../chart/slice'
 import { computeMarginTints } from '../chart/colors'
+import { isFlatBinaryDataset } from '@shared/spec/evaluate'
 import type { ChartPerf } from '../chart/perf'
 import { useLayeredCanvas } from '../chart/useLayeredCanvas'
 import type { LayerName, LayerRenderer } from '../chart/useLayeredCanvas'
@@ -24,15 +25,11 @@ import type { LayerName, LayerRenderer } from '../chart/useLayeredCanvas'
  * 因此不会因为逐帧 setState 触发组件树重渲染。
  */
 
-/** 入场动画：色块对角线渐显的总延迟跨度（ms） */
-const ENTRANCE_DELAY_SPAN = 260
-/** 入场动画：单个色块的淡入时长（ms） */
-const ENTRANCE_CELL_DURATION = 240
 /**
- * 动画总时长：墨迹模式是 6 层 × 30ms + 240ms ≈ 390ms，
- * 逐格模式是 260ms + 240ms = 500ms，统一取 560ms 收尾，避免不同模式时长不一致。
+ * 入场动画总时长由 render2d 的 ENTRANCE_TOTAL 决定（6 层 × 30ms + 240ms ≈ 390ms），
+ * 这里多留 60ms 作为收尾余量，避免最后一层的淡入被截断。
  */
-const ENTRANCE_TOTAL = 560
+const ENTRANCE_SETTLE = ENTRANCE_TOTAL + 60
 /** hover 涟漪时长（ms），与 render2d 的 RIPPLE_DURATION 保持一致 */
 const RIPPLE_MS = 300
 /** 氛围动效目标帧率：约 20fps，靠跳帧实现，不做全量逐帧重绘 */
@@ -49,8 +46,6 @@ interface Shmoo2DChartProps {
   xAxis: Axis
   yAxis: Axis
   mode: ChartColorMode
-  /** 二值模式的着色方式：墨迹（默认）/ 逐格 */
-  renderMode?: ChartRenderMode
   /** 氛围动效开关（默认关） */
   ambientMotion?: boolean
   /** 切片标记（返回 2D 后仍保留），null 表示没有 */
@@ -102,7 +97,6 @@ export function Shmoo2DChart({
   xAxis,
   yAxis,
   mode,
-  renderMode = 'ink',
   ambientMotion = false,
   sliceMarker = null,
   onSlice
@@ -111,11 +105,9 @@ export function Shmoo2DChart({
 
   // ---- 绘制阶段需要的最新状态（用 ref 保存，renderers 只依赖 ref，不会因 state 变化重建） ----
   const geometryRef = useRef<ChartGeometry | null>(null)
-  const motionRef = useRef<MotionInput>({ enabled: false, delaySpan: 0, cellDuration: 0, elapsed: 0 })
+  const motionRef = useRef<MotionInput>({ enabled: false, elapsed: 0 })
   const modeRef = useRef<ChartColorMode>(mode)
   modeRef.current = mode
-  const renderModeRef = useRef<ChartRenderMode>(renderMode)
-  renderModeRef.current = renderMode
   /** 氛围动效相位：只在 rAF 循环里推进，不进 React state */
   const ambientRef = useRef<{ phase: number; drift: number } | null>(null)
   const perfRef = useRef<ChartPerf>({ static: [], boundary: [], interaction: [], frames: 0 })
@@ -146,6 +138,10 @@ export function Shmoo2DChart({
     [site, dataset.spec, dataset.revision]
   )
 
+  // 纯二值数据集（0/1 pattern 或无 value 列）：整片饱和平涂，不做 margin 明度调制。
+  // 在这里算一次，renderers 与图例都读同一个布尔值，避免逐格判断。
+  const flatBinary = useMemo(() => isFlatBinaryDataset(dataset), [dataset])
+
   // ---- 三层绘制函数 ----
   // 注意：只依赖数据与轴（以及绘制时不会变化的常量），
   // hover / 动画进度 / 配色模式都通过 ref 读取，避免重建 renderers。
@@ -156,6 +152,8 @@ export function Shmoo2DChart({
       site,
       valueLabel: dataset.valueLabel,
       valueUnit: dataset.valueUnit,
+      // 数据集级配色分支：连续值走 margin 明度，纯二值走饱和平涂（useMemo 一次判定）
+      flatBinary,
       tint: marginTints
     }
 
@@ -168,7 +166,6 @@ export function Shmoo2DChart({
           ...dataInput,
           geometry,
           mode: modeRef.current,
-          renderMode: renderModeRef.current,
           motion: motionRef.current,
           sliceMarker
         })
@@ -186,7 +183,6 @@ export function Shmoo2DChart({
             ...dataInput,
             geometry,
             mode: modeRef.current,
-            renderMode: renderModeRef.current,
             motion: motionRef.current
           },
           // 氛围动效默认关闭：只有开关打开时才有相位对象
@@ -215,7 +211,7 @@ export function Shmoo2DChart({
         recordTiming('interaction', performance.now() - startedAt)
       }
     }
-  }, [dataset.valueLabel, dataset.valueUnit, site, xAxis, yAxis, recordTiming, marginTints, sliceMarker])
+  }, [dataset.valueLabel, dataset.valueUnit, flatBinary, site, xAxis, yAxis, recordTiming, marginTints, sliceMarker])
 
   const { containerRef, canvasRefs, size, repaint } = useLayeredCanvas(renderers)
 
@@ -232,7 +228,7 @@ export function Shmoo2DChart({
 
     // 尊重 prefers-reduced-motion：开启时瞬显，不跑任何动画帧
     if (reducedMotion) {
-      motionRef.current = { enabled: false, delaySpan: 0, cellDuration: 0, elapsed: 0 }
+      motionRef.current = { enabled: false, elapsed: 0 }
       repaint('all')
       return
     }
@@ -242,20 +238,15 @@ export function Shmoo2DChart({
 
     const tick = (now: number): void => {
       const elapsed = now - startedAt
-      motionRef.current = {
-        enabled: true,
-        delaySpan: ENTRANCE_DELAY_SPAN,
-        cellDuration: ENTRANCE_CELL_DURATION,
-        elapsed
-      }
+      motionRef.current = { enabled: true, elapsed }
       repaint('static')
       repaint('boundary')
 
-      if (elapsed < ENTRANCE_TOTAL) {
+      if (elapsed < ENTRANCE_SETTLE) {
         raf = window.requestAnimationFrame(tick)
       } else {
         // 收尾：关闭动画后整层重绘一次，确保所有色块都是不透明状态
-        motionRef.current = { enabled: false, delaySpan: 0, cellDuration: 0, elapsed: 0 }
+        motionRef.current = { enabled: false, elapsed: 0 }
         repaint('all')
       }
     }
@@ -269,12 +260,6 @@ export function Shmoo2DChart({
   useEffect(() => {
     repaint('interaction')
   }, [hover, hoverVisible, repaint])
-
-  // 墨迹 / 逐格切换：静态层与边界层各重绘一次。
-  // 绘图区尺寸由容器决定，切换本身不改变布局，因此不会出现跳动。
-  useEffect(() => {
-    repaint('all')
-  }, [renderMode, repaint])
 
   // 氛围动效：默认关闭。开启后用 rAF 推进相位，但只重绘边界层（≈20fps），
   // 静态色块层保持不动；关闭时立即停止循环并清掉相位，画面回到完全静止。

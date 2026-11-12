@@ -12,13 +12,6 @@ export type ColorMode = 'binary' | 'heat'
 /** 1D 图表形态：二值色带或连续曲线（阶段 ④） */
 export type OneDForm = 'band' | 'curve'
 
-/**
- * 2D 二值模式的着色方式（视觉重做）：
- *  - ink：默认，有机墨迹轮廓 + 点阵坐标参考；
- *  - cell：逐格实心填充，用于精确定位单点 / 稀疏数据确认。
- */
-export type ChartRenderMode = 'ink' | 'cell'
-
 interface AppState {
   /** 当前数据集；未导入或导入失败时为 null */
   dataset: ShmooDataset | null
@@ -30,9 +23,7 @@ interface AppState {
   colorMode: ColorMode
   /** 1D 图表形态：色带 / 曲线（阶段 ④），与 2D 的 colorMode 互不影响 */
   oneDForm: OneDForm
-  /** 2D 二值模式的着色方式：墨迹（默认）/ 逐格 */
-  renderMode: ChartRenderMode
-  /** 氛围动效开关（默认关）：开启后才有 FAIL 辉光呼吸 + 轮廓噪声流动 */
+  /** 氛围动效开关（默认关）：开启后边界线会轻微呼吸、图区噪点缓慢流动 */
   ambientMotion: boolean
   /** 当前切片视图（非 null 时中央显示这条 2D 行/列的 1D 曲线） */
   slice: SliceRef | null
@@ -59,8 +50,6 @@ interface AppState {
   setSpec: (spec: SpecLimit) => void
   setColorMode: (mode: ColorMode) => void
   setOneDForm: (form: OneDForm) => void
-  /** 切换墨迹 / 逐格显示（不改变绘图区尺寸，避免布局跳动） */
-  setRenderMode: (mode: ChartRenderMode) => void
   /** 开关氛围动效；关闭时立即停掉 rAF 循环，画面回到完全静止 */
   setAmbientMotion: (enabled: boolean) => void
   /** 打开某一行 / 列的切片视图（同时记下 2D 上的标记） */
@@ -80,8 +69,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   spec: DEFAULT_SPEC,
   colorMode: 'binary',
   oneDForm: 'band',
-  // 默认墨迹模式（视觉重做）：逐格模式保留为“精确判读”备选
-  renderMode: 'ink',
   ambientMotion: false,
   slice: null,
   sliceMarker: null,
@@ -159,7 +146,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSpec: (spec) => set({ spec }),
   setColorMode: (mode) => set({ colorMode: mode }),
   setOneDForm: (form) => set({ oneDForm: form }),
-  setRenderMode: (mode) => set({ renderMode: mode }),
   setAmbientMotion: (enabled) => set({ ambientMotion: enabled }),
 
   openSlice: (ref) => {

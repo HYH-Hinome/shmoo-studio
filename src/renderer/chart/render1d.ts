@@ -4,8 +4,10 @@ import { evaluatePoint } from '@shared/spec/evaluate'
 import {
   BINARY_PALETTE,
   CHART_STRUCTURE,
+  PASSFAIL_PALETTE,
   binaryMarginColor,
-  binarySwatchStops
+  binarySwatchStops,
+  passFailColor
 } from './colors'
 import {
   DEFAULT_PADDING,
@@ -15,7 +17,7 @@ import {
   tickDecimals
 } from './geometry'
 import type { CanvasSize } from './render2d'
-import { drawCellHatch } from './render2d'
+import { CELL_GAP, cellCornerRadius, drawCellHatch } from './render2d'
 import {
   RUN_BOUNDARY_LABEL,
   computeValueScale,
@@ -68,6 +70,8 @@ export interface OneDStaticInput {
   form: OneDForm
   /** 每个采样点的 |margin| 归一化值；与 2D 共用同一套计算 */
   tint: Float32Array | null
+  /** 纯二值数据集（0/1 pattern / 无 value）：色带与曲线点改用饱和平涂系统色 */
+  flatBinary: boolean
   motion: OneDMotion
 }
 
@@ -147,11 +151,12 @@ function drawXAxis(
   ctx.fillText(title, plot.x + plot.w / 2, height - 10)
 }
 
-/** 右侧图例（色带模式）：PASS / FAIL / NO DATA，明度含义与 2D 一致 */
+/** 右侧图例（色带模式）：PASS / FAIL / NO DATA；纯二值数据改为平涂系统色 */
 function drawBinaryLegend(
   ctx: CanvasRenderingContext2D,
   plot: { x: number; y: number; w: number },
-  rows: Array<{ label: string; state: number; hatch?: boolean }>
+  rows: Array<{ label: string; state: number; hatch?: boolean }>,
+  flat: boolean
 ): void {
   const x0 = plot.x + plot.w + 18
   let y = plot.y + 10
@@ -163,6 +168,12 @@ function drawBinaryLegend(
       ctx.fillStyle = BINARY_PALETTE.unknownBase
       ctx.fillRect(x0, y - 5, 10, 10)
       drawCellHatch(ctx, x0, y - 5, 10, 10, 4)
+    } else if (flat) {
+      ctx.fillStyle = passFailColor(row.state)
+      ctx.fillRect(x0, y - 5, 10, 10)
+      ctx.strokeStyle = 'rgba(147, 166, 186, 0.22)'
+      ctx.lineWidth = 0.5
+      ctx.strokeRect(x0 + 0.25, y - 4.75, 9.5, 9.5)
     } else {
       const stops = binarySwatchStops(row.state, 4)
       const stepH = 10 / stops.length
@@ -181,7 +192,7 @@ function drawBinaryLegend(
   }
 
   ctx.fillStyle = CHART_STRUCTURE.legendMuted
-  ctx.fillText('明度 ∝ |margin|', x0, y + 6)
+  ctx.fillText(flat ? '二值判定' : '明度 ∝ |margin|', x0, y + 6)
 }
 
 /** 窗口标注文字：边界值 + 宽度，统一保留与 x 轴一致的小数位 */
@@ -202,7 +213,8 @@ function drawBand(
   site: SiteGrid,
   tint: Float32Array | null,
   geometry: ReturnType<typeof computeGeometry>,
-  reveal: number
+  reveal: number,
+  flatPalette: boolean
 ): void {
   const { plot } = geometry
   const { dpr } = size
@@ -210,7 +222,6 @@ function drawBand(
   const nx = x.length
   const bandH = bandHeight(plot.h)
   const bandTop = plot.y + (plot.h - bandH) / 2
-  const bandBottom = bandTop + bandH
 
   const xDecimals = tickDecimals(x)
   const runs = findPassRuns(x, site.pass)
@@ -246,40 +257,53 @@ function drawBand(
     ctx.fillText(text, plot.x, plot.y + 28)
   }
 
-  // 2. 色带：逐点画竖条，颜色与 2D 二值模式完全同源
+  // 2. 色带：每点一根圆角竖条，条间 1px 缝；颜色与 2D 二值模式完全同源。
+  //    1D 的格子是宽扁矩形，圆角按短边（色带高度）计算并夹到 5px，不会变成胶囊。
   const clipRight = plot.x + plot.w * reveal
   const centers: number[] = []
+  const cellTop = bandTop + CELL_GAP / 2
+  const cellH = Math.max(0, bandH - CELL_GAP)
+
+  // 入场揭示：整条色带一起裁剪，避免最后一格出现“半个圆角”的突兀缺口
+  ctx.save()
+  ctx.beginPath()
+  ctx.rect(plot.x, bandTop, Math.max(0, plot.w * reveal), bandH)
+  ctx.clip()
+
   for (let ix = 0; ix < nx; ix++) {
-    const left = snap(geometry.x.edges[ix], dpr)
-    const right = snap(geometry.x.edges[ix + 1], dpr)
+    const left = geometry.x.edges[ix] + CELL_GAP / 2
+    const right = geometry.x.edges[ix + 1] - CELL_GAP / 2
+    const width = Math.max(0, right - left)
     centers.push((left + right) / 2)
-    if (left > clipRight) continue
+    if (width <= 0 || left >= clipRight) continue
 
     const index = ix
     const state = site.pass[index]
     const value = site.value[index]
-    const drawRight = Math.min(right, clipRight)
+    const radius = cellCornerRadius(width, cellH)
 
     if (state === CELL_UNKNOWN || !Number.isFinite(value)) {
       ctx.fillStyle = BINARY_PALETTE.unknownBase
-      ctx.fillRect(left, snap(bandTop, dpr), drawRight - left, snap(bandBottom, dpr) - snap(bandTop, dpr))
-      drawCellHatch(ctx, left, snap(bandTop, dpr), drawRight - left, snap(bandBottom, dpr) - snap(bandTop, dpr))
+      ctx.beginPath()
+      ctx.roundRect(left, cellTop, width, cellH, radius)
+      ctx.fill()
+      ctx.save()
+      ctx.beginPath()
+      ctx.roundRect(left, cellTop, width, cellH, radius)
+      ctx.clip()
+      drawCellHatch(ctx, left, cellTop, width, cellH)
+      ctx.restore()
     } else {
-      const m = tint ? tint[index] : 0.5
-      ctx.fillStyle = binaryMarginColor(state, m)
-      ctx.fillRect(left, snap(bandTop, dpr), drawRight - left, snap(bandBottom, dpr) - snap(bandTop, dpr))
+      // 纯二值数据没有 margin 可表达 → 平涂系统色；连续值保留明度调制
+      ctx.fillStyle = flatPalette
+        ? passFailColor(state)
+        : binaryMarginColor(state, tint ? tint[index] : 0.5)
+      ctx.beginPath()
+      ctx.roundRect(left, cellTop, width, cellH, radius)
+      ctx.fill()
     }
   }
-
-  // 3. 色带外框：上下两条细线，暗示这是“一条”数据带而不是独立矩形
-  ctx.strokeStyle = 'rgba(147, 166, 186, 0.22)'
-  ctx.lineWidth = 1
-  ctx.beginPath()
-  ctx.moveTo(plot.x, snap(bandTop, dpr) + 0.5 / dpr)
-  ctx.lineTo(plot.x + plot.w * reveal, snap(bandTop, dpr) + 0.5 / dpr)
-  ctx.moveTo(plot.x, snap(bandBottom, dpr) + 0.5 / dpr)
-  ctx.lineTo(plot.x + plot.w * reveal, snap(bandBottom, dpr) + 0.5 / dpr)
-  ctx.stroke()
+  ctx.restore()
 
   // 4. 边界：每个边界采样点画一条虚线落到 x 轴，数值标在色带上方。
   //    双边时会有 4 个（下限失效 / 下限恢复 / 上限恢复 / 上限失效），
@@ -318,11 +342,16 @@ function drawBand(
   })
 
   // 5. 图例
-  drawBinaryLegend(ctx, plot, [
-    { label: 'PASS', state: CELL_PASS },
-    { label: 'FAIL', state: CELL_FAIL },
-    { label: 'NO DATA', state: CELL_UNKNOWN, hatch: true }
-  ])
+  drawBinaryLegend(
+    ctx,
+    plot,
+    [
+      { label: 'PASS', state: CELL_PASS },
+      { label: 'FAIL', state: CELL_FAIL },
+      { label: 'NO DATA', state: CELL_UNKNOWN, hatch: true }
+    ],
+    flatPalette
+  )
 }
 
 /**
@@ -383,20 +412,21 @@ function trianglePath(
 
 /**
  * 越界点标记（主图用）：用三角形方向区分“撞哪一边”，
- * 先画深色放大底，再叠红色，保证压在红带/曲线上仍可辨认。
+ * 先画深色放大底，再叠一层判定色，保证压在红带/曲线上仍可辨认。
  */
 function drawFailMarker(
   ctx: CanvasRenderingContext2D,
   cx: number,
   cy: number,
-  side: SpecSide | null
+  side: SpecSide | null,
+  fill: string
 ): void {
   const up = side !== 'min'
   trianglePath(ctx, cx, cy, 5.2, up)
   ctx.fillStyle = '#0a0f16'
   ctx.fill()
   trianglePath(ctx, cx, cy, 3.5, up)
-  ctx.fillStyle = BINARY_PALETTE.failAnchor
+  ctx.fillStyle = fill
   ctx.fill()
   ctx.strokeStyle = '#ff8b84'
   ctx.lineWidth = 0.9
@@ -408,10 +438,11 @@ function drawLegendMarker(
   ctx: CanvasRenderingContext2D,
   cx: number,
   cy: number,
-  side: SpecSide
+  side: SpecSide,
+  fill: string
 ): void {
   trianglePath(ctx, cx, cy, 4.2, side !== 'min')
-  ctx.fillStyle = BINARY_PALETTE.failAnchor
+  ctx.fillStyle = fill
   ctx.fill()
 }
 
@@ -423,7 +454,8 @@ function drawCurve(
   site: SiteGrid,
   geometry: ReturnType<typeof computeGeometry>,
   scale: ValueScale,
-  reveal: number
+  reveal: number,
+  flat: boolean
 ): void {
   const { plot } = geometry
   const { dpr } = size
@@ -432,6 +464,9 @@ function drawCurve(
   const nx = x.length
   const yDecimals = tickDecimals(scale.ticks)
   const yTicks = scale.ticks
+  // 纯二值数据集没有 margin：点/标记改用 iOS 系统色，其余曲线逻辑不变
+  const failFill = flat ? PASSFAIL_PALETTE.fail : BINARY_PALETTE.failAnchor
+  const passFill = flat ? PASSFAIL_PALETTE.pass : BINARY_PALETTE.passAnchor
 
   // 1. 横向网格 + y 刻度
   ctx.font = FONT_MONO
@@ -480,12 +515,12 @@ function drawCurve(
   const spec = dataset.spec
   if (typeof spec.max === 'number') {
     const py = valueToY(spec.max, scale, plot.y, plot.h)
-    ctx.fillStyle = 'rgba(192, 69, 62, 0.07)'
+    ctx.fillStyle = flat ? 'rgba(255, 59, 48, 0.07)' : 'rgba(181, 86, 79, 0.07)'
     ctx.fillRect(plot.x, plot.y, plot.w, Math.max(0, py - plot.y))
   }
   if (typeof spec.min === 'number') {
     const py = valueToY(spec.min, scale, plot.y, plot.h)
-    ctx.fillStyle = 'rgba(192, 69, 62, 0.07)'
+    ctx.fillStyle = flat ? 'rgba(255, 59, 48, 0.07)' : 'rgba(181, 86, 79, 0.07)'
     ctx.fillRect(plot.x, py, plot.w, Math.max(0, plot.y + plot.h - py))
   }
 
@@ -567,11 +602,11 @@ function drawCurve(
     const cy = valueToY(v, scale, plot.y, plot.h)
     if (state === CELL_FAIL) {
       // 越界点：三角形方向表示撞哪一边（▲ 超上限 / ▼ 低于下限）
-      drawFailMarker(ctx, cx, cy, evaluatePoint(v, dataset.spec).side)
+      drawFailMarker(ctx, cx, cy, evaluatePoint(v, dataset.spec).side, failFill)
     } else if (state === CELL_PASS) {
       ctx.beginPath()
       ctx.arc(cx, cy, 2.1, 0, Math.PI * 2)
-      ctx.fillStyle = BINARY_PALETTE.passAnchor
+      ctx.fillStyle = passFill
       ctx.fill()
     }
   }
@@ -606,7 +641,7 @@ function drawCurve(
   y += 18
   ctx.beginPath()
   ctx.arc(x0 + 5, y, 2.1, 0, Math.PI * 2)
-  ctx.fillStyle = BINARY_PALETTE.passAnchor
+  ctx.fillStyle = passFill
   ctx.fill()
   ctx.fillText('合格点', x0 + 16, y)
 
@@ -616,17 +651,17 @@ function drawCurve(
   const hasMax = typeof spec.max === 'number' && spec.mode !== 'none'
   if (hasMin && hasMax) {
     y += 18
-    drawLegendMarker(ctx, x0 + 5, y, 'max')
+    drawLegendMarker(ctx, x0 + 5, y, 'max', failFill)
     ctx.fillStyle = CHART_STRUCTURE.legendText
     ctx.fillText('超上限', x0 + 16, y)
 
     y += 18
-    drawLegendMarker(ctx, x0 + 5, y, 'min')
+    drawLegendMarker(ctx, x0 + 5, y, 'min', failFill)
     ctx.fillStyle = CHART_STRUCTURE.legendText
     ctx.fillText('低于下限', x0 + 16, y)
   } else {
     y += 18
-    drawLegendMarker(ctx, x0 + 5, y, hasMax ? 'max' : 'min')
+    drawLegendMarker(ctx, x0 + 5, y, hasMax ? 'max' : 'min', failFill)
     ctx.fillStyle = CHART_STRUCTURE.legendText
     ctx.fillText('越界点', x0 + 16, y)
   }
@@ -650,7 +685,7 @@ export function drawOneDStatic(
   size: CanvasSize,
   input: OneDStaticInput
 ): void {
-  const { dataset, site, form, tint, motion } = input
+  const { dataset, site, form, tint, flatBinary, motion } = input
   const { width, height, dpr } = size
 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -681,13 +716,13 @@ export function drawOneDStatic(
   const xCenters = x.map((_, ix) => cellCenter(geometry, ix, 0).x)
 
   if (form === 'band') {
-    drawBand(ctx, size, dataset, site, tint, geometry, reveal)
+    drawBand(ctx, size, dataset, site, tint, geometry, reveal, flatBinary)
   } else {
     // 刻度密度跟着绘图区高度走：高容器多给几条，矮容器少给几条，避免出现大片空白
     const tickCount = Math.max(4, Math.min(10, Math.round(plot.h / 70)))
     const scale = computeValueScale(site.value, dataset.spec, tickCount)
     if (scale) {
-      drawCurve(ctx, size, dataset, site, geometry, scale, reveal)
+      drawCurve(ctx, size, dataset, site, geometry, scale, reveal, flatBinary)
     } else {
       ctx.font = FONT_MONO
       ctx.fillStyle = CHART_STRUCTURE.legendMuted

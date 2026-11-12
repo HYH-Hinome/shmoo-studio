@@ -7,6 +7,7 @@ import {
   computeMarginTints,
   heatGradientStops,
   mixColor,
+  passFailColor,
   sampleHeatColor,
   valueToT
 } from '@renderer/chart/colors'
@@ -102,8 +103,8 @@ describe('binaryMarginColor（A′：margin 明度调制 + 正红 FAIL）', () =
   })
 
   it('PASS 青绿 / FAIL 正红，端点色值固定', () => {
-    expect(binaryMarginColor(CELL_PASS, 1)).toBe('#26968a')
-    expect(binaryMarginColor(CELL_FAIL, 1)).toBe('#c0453e')
+    expect(binaryMarginColor(CELL_PASS, 1)).toBe('#3d8b80')
+    expect(binaryMarginColor(CELL_FAIL, 1)).toBe('#b5564f')
   })
 
   it('FAIL 暗端为同色相压暗，仍偏红（不偏灰/偏黄）', () => {
@@ -126,6 +127,22 @@ describe('binaryMarginColor（A′：margin 明度调制 + 正红 FAIL）', () =
   it('未知格恒为 unknownBase，与 m 无关', () => {
     expect(binaryMarginColor(CELL_UNKNOWN, 0)).toBe(BINARY_PALETTE.unknownBase)
     expect(binaryMarginColor(CELL_UNKNOWN, 1)).toBe(BINARY_PALETTE.unknownBase)
+  })
+})
+
+describe('passFailColor（纯二值数据：饱和平涂，不做明度调制）', () => {
+  it('PASS = #34C759，FAIL = #FF3B30，未知格回到缺测底色', () => {
+    expect(passFailColor(CELL_PASS)).toBe('#34C759')
+    expect(passFailColor(CELL_FAIL)).toBe('#FF3B30')
+    expect(passFailColor(CELL_UNKNOWN)).toBe(BINARY_PALETTE.unknownBase)
+  })
+
+  it('30×30 = 900 格里同状态颜色完全一致（只有 2 种颜色）', () => {
+    const colors = new Set<string>()
+    for (let i = 0; i < 900; i++) colors.add(passFailColor(i % 2))
+    expect(colors.size).toBe(2)
+    expect(colors.has('#34C759')).toBe(true)
+    expect(colors.has('#FF3B30')).toBe(true)
   })
 })
 
