@@ -1,4 +1,5 @@
-import type { ShmooDataset } from '@shared/types/shmoo'
+import type { ShmooDataset, SiteGrid } from '@shared/types/shmoo'
+import { CELL_FAIL, CELL_PASS, CELL_UNKNOWN } from '@shared/types/shmoo'
 import type { ChartBench } from '../chart/perf'
 import { DEFAULT_PADDING, cellCenter, computeGeometry } from '../chart/geometry'
 import { computeMarginTints } from '../chart/colors'
@@ -21,6 +22,7 @@ import { useAppStore } from '../state/store'
  *                           1D 数据集写成 ?hover=7（按采样下标吸附）
  *   ?demo=1&slice=row:12     载入 2D 样例后直接切出第 12 行（列切片写 slice=col:8）
  *   ?demo=1&bench=1          额外跑 1920×1080 @ DPR2 的静态层压测，结果写入 window.__shmooBench
+ *   ?demo=1&bench=1&grid=100 用合成 100×100 网格压测（默认用样例的 30×30）
  *
  * 生产构建时 main.tsx 中的 `import.meta.env.DEV` 分支会被静态剔除，
  * 本文件连同样例 CSV 都不会进入产物。
@@ -166,11 +168,61 @@ function quantile(sorted: number[], q: number): number {
 }
 
 /**
+ * 合成一个 n×n 的站点，用于 100×100 性能压测。
+ * 形状做成“一个大通过区 + 一条失效带 + 少量缺测点”，接近真实 Shmoo 的分布，
+ * 而不是棋盘格（棋盘格会产生上千个微小连通区，属于不现实的极端场景）。
+ */
+function syntheticSite(nx: number, ny: number): SiteGrid {
+  const value = new Float32Array(nx * ny)
+  const pass = new Uint8Array(nx * ny)
+  let seed = 987654321
+  const random = (): number => {
+    seed = (seed * 1664525 + 1013904223) >>> 0
+    return seed / 4294967296
+  }
+
+  let knownCount = 0
+  let passCount = 0
+  for (let iy = 0; iy < ny; iy++) {
+    for (let ix = 0; ix < nx; ix++) {
+      const index = iy * nx + ix
+      const dx = (ix - nx / 2) / (nx / 2)
+      const dy = (iy - ny / 2) / (ny / 2)
+      const radius = Math.hypot(dx, dy)
+      // 中心通过、外圈失效，并在右上角挖一个缺测小区
+      const unknown = radius > 0.35 && ix > nx * 0.72 && iy > ny * 0.72 ? random() < 0.4 : false
+      if (unknown) {
+        value[index] = Number.NaN
+        pass[index] = CELL_UNKNOWN
+        continue
+      }
+      const ok = radius < 0.62 + (random() - 0.5) * 0.08
+      value[index] = ok ? 800 + random() * 40 : 600 + random() * 40
+      pass[index] = ok ? CELL_PASS : CELL_FAIL
+      knownCount++
+      if (ok) passCount++
+    }
+  }
+
+  return {
+    siteId: 'SITE_100',
+    siteLabel: 'SITE_100',
+    value,
+    pass,
+    valueRange: { min: 600, max: 850 },
+    knownCount,
+    passCount
+  }
+}
+
+/**
  * 1920×1080 @ DPR2 的静态层压测：
  * 按文档的性能红线（1080p、DPR=2）直接跑 drawStaticLayer，
  * 这比窗口实际尺寸更严格，也便于和文档指标对比。
+ *
+ * @param grid 大于 0 时忽略数据集本身，改用该边长的合成网格（用于 100×100 回归）
  */
-function runBench(dataset: ShmooDataset): void {
+function runBench(dataset: ShmooDataset, grid = 0): void {
   if (!dataset.yAxis) return
   const width = 1920
   const height = 1080
@@ -183,16 +235,23 @@ function runBench(dataset: ShmooDataset): void {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
 
-  const site = dataset.sites[0]
-  const geometry = computeGeometry(width, height, DEFAULT_PADDING, dataset.xAxis.values, dataset.yAxis.values)
+  const nx = grid > 0 ? grid : dataset.xAxis.values.length
+  const ny = grid > 0 ? grid : dataset.yAxis.values.length
+  const xAxis = grid > 0 ? { ...dataset.xAxis, values: Array.from({ length: nx }, (_, i) => i) } : dataset.xAxis
+  const yAxis = grid > 0 ? { ...dataset.yAxis, values: Array.from({ length: ny }, (_, j) => j) } : dataset.yAxis
+  const site = grid > 0 ? syntheticSite(nx, ny) : dataset.sites[0]
+
+  const geometry = computeGeometry(width, height, DEFAULT_PADDING, xAxis.values, yAxis.values)
   const input = {
     geometry,
-    xAxis: dataset.xAxis,
-    yAxis: dataset.yAxis,
+    xAxis,
+    yAxis,
     site,
     valueLabel: dataset.valueLabel,
     valueUnit: dataset.valueUnit,
     mode: 'binary' as const,
+    // 压测墨迹模式：这是默认视觉，也是最重的一条路径（轮廓路径 + 点阵 + 噪点）
+    renderMode: 'ink' as const,
     tint: computeMarginTints(site, dataset.spec),
     motion: { enabled: false, delaySpan: 0, cellDuration: 0, elapsed: 0 }
   }
@@ -212,7 +271,8 @@ function runBench(dataset: ShmooDataset): void {
     width,
     height,
     dpr,
-    cells: dataset.xAxis.values.length * dataset.yAxis.values.length,
+    // 用实际参与绘制的网格（grid 参数会覆盖数据集尺寸），否则 100×100 压测会误报 900 格
+    cells: nx * ny,
     runs,
     median: quantile(sorted, 0.5),
     p95: quantile(sorted, 0.95),
@@ -270,5 +330,8 @@ export async function maybeLoadDemo(): Promise<void> {
     }
   }
 
-  if (params.get('bench') === '1' && dataset.kind === '2d') runBench(dataset)
+  if (params.get('bench') === '1' && dataset.kind === '2d') {
+    const grid = Number.parseInt(params.get('grid') ?? '0', 10)
+    runBench(dataset, Number.isFinite(grid) && grid > 0 ? grid : 0)
+  }
 }

@@ -5,7 +5,7 @@ import { CELL_FAIL, CELL_PASS } from '@shared/types/shmoo'
 import { DEFAULT_PADDING, cellCenter, computeGeometry, hitTest, tickDecimals } from '../chart/geometry'
 import type { CellIndex, ChartGeometry } from '../chart/geometry'
 import { drawBoundaryLayer, drawInteractionLayer, drawStaticLayer } from '../chart/render2d'
-import type { ChartColorMode, MotionInput } from '../chart/render2d'
+import type { ChartColorMode, ChartRenderMode, MotionInput } from '../chart/render2d'
 import type { SliceRef } from '../chart/slice'
 import { computeMarginTints } from '../chart/colors'
 import type { ChartPerf } from '../chart/perf'
@@ -28,6 +28,15 @@ import type { LayerName, LayerRenderer } from '../chart/useLayeredCanvas'
 const ENTRANCE_DELAY_SPAN = 260
 /** 入场动画：单个色块的淡入时长（ms） */
 const ENTRANCE_CELL_DURATION = 240
+/**
+ * 动画总时长：墨迹模式是 6 层 × 30ms + 240ms ≈ 390ms，
+ * 逐格模式是 260ms + 240ms = 500ms，统一取 560ms 收尾，避免不同模式时长不一致。
+ */
+const ENTRANCE_TOTAL = 560
+/** hover 涟漪时长（ms），与 render2d 的 RIPPLE_DURATION 保持一致 */
+const RIPPLE_MS = 300
+/** 氛围动效目标帧率：约 20fps，靠跳帧实现，不做全量逐帧重绘 */
+const AMBIENT_FRAME_MS = 50
 /** hover 浮层与格中心的间距（px） */
 const TOOLTIP_OFFSET = 14
 /** hover 浮层尺寸估算，用于判断是否翻转方向（与 CSS 中宽度一致） */
@@ -40,6 +49,10 @@ interface Shmoo2DChartProps {
   xAxis: Axis
   yAxis: Axis
   mode: ChartColorMode
+  /** 二值模式的着色方式：墨迹（默认）/ 逐格 */
+  renderMode?: ChartRenderMode
+  /** 氛围动效开关（默认关） */
+  ambientMotion?: boolean
   /** 切片标记（返回 2D 后仍保留），null 表示没有 */
   sliceMarker?: SliceRef | null
   /** 双击某格时触发：切出该格所在的行（列可通过切片视图内的标签切换） */
@@ -89,6 +102,8 @@ export function Shmoo2DChart({
   xAxis,
   yAxis,
   mode,
+  renderMode = 'ink',
+  ambientMotion = false,
   sliceMarker = null,
   onSlice
 }: Shmoo2DChartProps): JSX.Element {
@@ -99,6 +114,10 @@ export function Shmoo2DChart({
   const motionRef = useRef<MotionInput>({ enabled: false, delaySpan: 0, cellDuration: 0, elapsed: 0 })
   const modeRef = useRef<ChartColorMode>(mode)
   modeRef.current = mode
+  const renderModeRef = useRef<ChartRenderMode>(renderMode)
+  renderModeRef.current = renderMode
+  /** 氛围动效相位：只在 rAF 循环里推进，不进 React state */
+  const ambientRef = useRef<{ phase: number; drift: number } | null>(null)
   const perfRef = useRef<ChartPerf>({ static: [], boundary: [], interaction: [], frames: 0 })
 
   // hover 只影响交互层与 DOM 浮层；绘制时通过 ref 读取，避免高频 state → 重绘调度链路
@@ -108,6 +127,12 @@ export function Shmoo2DChart({
   const hoverVisibleRef = useRef(hoverVisible)
   hoverRef.current = hover
   hoverVisibleRef.current = hoverVisible
+
+  // hover 涟漪：起点 + 开始时间；动画进度只放在 ref 里，不触发 React 重渲染
+  const rippleRef = useRef<{ x: number; y: number; startedAt: number } | null>(null)
+  const rippleRafRef = useRef(0)
+  /** 涟漪进度（ms），绘制时读取；null 表示不画 */
+  const rippleElapsedRef = useRef<number | null>(null)
 
   const recordTiming = useCallback((key: 'static' | 'boundary' | 'interaction', ms: number) => {
     pushSample(perfRef.current[key], ms)
@@ -143,6 +168,7 @@ export function Shmoo2DChart({
           ...dataInput,
           geometry,
           mode: modeRef.current,
+          renderMode: renderModeRef.current,
           motion: motionRef.current,
           sliceMarker
         })
@@ -153,12 +179,19 @@ export function Shmoo2DChart({
         const geometry = geometryRef.current
         if (!geometry) return
         const startedAt = performance.now()
-        drawBoundaryLayer(ctx, size, {
-          ...dataInput,
-          geometry,
-          mode: modeRef.current,
-          motion: motionRef.current
-        })
+        drawBoundaryLayer(
+          ctx,
+          size,
+          {
+            ...dataInput,
+            geometry,
+            mode: modeRef.current,
+            renderMode: renderModeRef.current,
+            motion: motionRef.current
+          },
+          // 氛围动效默认关闭：只有开关打开时才有相位对象
+          ambientRef.current
+        )
         recordTiming('boundary', performance.now() - startedAt)
       },
       interaction: (ctx, size) => {
@@ -166,11 +199,18 @@ export function Shmoo2DChart({
         if (!geometry) return
         const startedAt = performance.now()
         const active = hoverVisibleRef.current ? hoverRef.current : null
+        const origin = rippleRef.current
+        const elapsed = rippleElapsedRef.current
         drawInteractionLayer(ctx, size, {
           geometry,
           hover: active,
           // 悬停整行提示：只依赖当前格子的行号，hover 变化时重绘这一层即可
-          hoverRow: active ? active.iy : null
+          hoverRow: active ? active.iy : null,
+          // 涟漪：起点与进度都来自 ref，避免逐帧 setState
+          ripple:
+            origin && elapsed !== null
+              ? { x: origin.x, y: origin.y, elapsed }
+              : null
         })
         recordTiming('interaction', performance.now() - startedAt)
       }
@@ -211,7 +251,7 @@ export function Shmoo2DChart({
       repaint('static')
       repaint('boundary')
 
-      if (elapsed < ENTRANCE_DELAY_SPAN + ENTRANCE_CELL_DURATION) {
+      if (elapsed < ENTRANCE_TOTAL) {
         raf = window.requestAnimationFrame(tick)
       } else {
         // 收尾：关闭动画后整层重绘一次，确保所有色块都是不透明状态
@@ -229,6 +269,73 @@ export function Shmoo2DChart({
   useEffect(() => {
     repaint('interaction')
   }, [hover, hoverVisible, repaint])
+
+  // 墨迹 / 逐格切换：静态层与边界层各重绘一次。
+  // 绘图区尺寸由容器决定，切换本身不改变布局，因此不会出现跳动。
+  useEffect(() => {
+    repaint('all')
+  }, [renderMode, repaint])
+
+  // 氛围动效：默认关闭。开启后用 rAF 推进相位，但只重绘边界层（≈20fps），
+  // 静态色块层保持不动；关闭时立即停止循环并清掉相位，画面回到完全静止。
+  useEffect(() => {
+    if (!ambientMotion || reducedMotion || mode !== 'binary') {
+      ambientRef.current = null
+      repaint('boundary')
+      return
+    }
+
+    const startedAt = performance.now()
+    let lastPaint = 0
+    let raf = 0
+
+    const tick = (now: number): void => {
+      // 跳帧到约 20fps：氛围动效是慢速呼吸，没有必要跑满 60fps
+      if (now - lastPaint >= AMBIENT_FRAME_MS) {
+        lastPaint = now
+        const seconds = (now - startedAt) / 1000
+        ambientRef.current = {
+          // 4s 一个呼吸周期
+          phase: (seconds / 4) * Math.PI * 2,
+          // 噪声纹理缓慢平移（96px 平铺，取模避免数值过大）
+          drift: (seconds * 8) % 96
+        }
+        repaint('boundary')
+      }
+      raf = window.requestAnimationFrame(tick)
+    }
+
+    raf = window.requestAnimationFrame(tick)
+    return () => {
+      window.cancelAnimationFrame(raf)
+      ambientRef.current = null
+    }
+  }, [ambientMotion, reducedMotion, mode, repaint])
+
+  // 字体就绪后重绘：JetBrains Mono 是本地打包字体，首帧可能还没加载完，
+  // 若不重绘会出现“第一次进来刻度是回退字体、切一次站点才变”的问题。
+  useEffect(() => {
+    if (typeof document === 'undefined' || !document.fonts) return
+    let cancelled = false
+    void document.fonts
+      .load('10px "JetBrains Mono"')
+      .then(() => {
+        if (!cancelled) repaint('all')
+      })
+      .catch(() => {
+        // 字体加载失败不阻塞图表：继续用等宽回退字体
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [repaint])
+
+  // 卸载时清理涟漪 rAF，避免访问已销毁的 canvas
+  useEffect(() => {
+    return () => {
+      if (rippleRafRef.current) window.cancelAnimationFrame(rippleRafRef.current)
+    }
+  }, [])
 
   // 切片标记只在静态层：变化时重绘静态层（返回 2D 后标记要立刻出现）
   useEffect(() => {
@@ -255,6 +362,42 @@ export function Shmoo2DChart({
     return hitTest(geometry, px, py)
   }
 
+  /**
+   * 从命中点扩散涟漪。
+   * 动画全程只重绘交互层，且 300ms 后自动停下；reduced-motion 下直接不启动。
+   */
+  const startRipple = useCallback(
+    (x: number, y: number): void => {
+      if (reducedMotion) return
+      rippleRef.current = { x, y, startedAt: performance.now() }
+      rippleElapsedRef.current = 0
+      // 已有循环在跑时只重置起点，不叠加新的 rAF
+      if (rippleRafRef.current) return
+
+      const tick = (now: number): void => {
+        const origin = rippleRef.current
+        if (!origin) {
+          rippleRafRef.current = 0
+          return
+        }
+        const elapsed = now - origin.startedAt
+        rippleElapsedRef.current = Math.min(elapsed, RIPPLE_MS)
+        repaint('interaction')
+
+        if (elapsed < RIPPLE_MS) {
+          rippleRafRef.current = window.requestAnimationFrame(tick)
+        } else {
+          // 结束后清掉进度，交互层再画一次就没有涟漪残留
+          rippleRafRef.current = 0
+          rippleElapsedRef.current = null
+          repaint('interaction')
+        }
+      }
+      rippleRafRef.current = window.requestAnimationFrame(tick)
+    },
+    [reducedMotion, repaint]
+  )
+
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
     const cell = cellFromPoint(event.clientX, event.clientY)
     if (!cell) {
@@ -263,7 +406,12 @@ export function Shmoo2DChart({
       return
     }
 
-    if (!hover || hover.ix !== cell.ix || hover.iy !== cell.iy) setHover(cell)
+    if (!hover || hover.ix !== cell.ix || hover.iy !== cell.iy) {
+      setHover(cell)
+      // 每次进入新的格子才扩散一次，同一格内移动不重复触发
+      const center = cellCenter(geometry, cell.ix, cell.iy)
+      startRipple(center.x, center.y)
+    }
     if (!hoverVisible) setHoverVisible(true)
   }
 

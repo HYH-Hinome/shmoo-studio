@@ -637,6 +637,41 @@ select {
   cursor: default;
 }
 
+/* 氛围动效开关：与 .segmented 同高（28px），放在工具栏里不改变任何布局尺寸 */
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-inset);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+.toggle:hover {
+  color: var(--color-text-primary);
+}
+
+/* 开启态：用强调色描边 + 小圆点，而不是整块高亮，避免在数据区旁边抢视线 */
+.toggle.is-active {
+  border-color: var(--color-accent-line);
+  color: var(--color-accent-strong);
+}
+
+.toggle.is-active::before {
+  content: '';
+  width: 4px;
+  height: 4px;
+  margin-right: var(--space-2);
+  border-radius: 50%;
+  background: var(--color-accent-strong);
+}
+
 /* 切片面包屑：与 .segmented 同高（2+22+2 + 上下边框），切换 2D/切片时工具栏不抖 */
 .crumb {
   display: inline-flex;

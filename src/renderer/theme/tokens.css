@@ -8,6 +8,28 @@
  * 视觉定位：仪器 / EDA 软件的深色专业风 —— 低饱和背景、青色强调、pass 绿 / fail 红只用于数据语义。
  */
 
+/**
+ * JetBrains Mono（OFL 许可，随仓库打包，不依赖系统字体）。
+ * 只打包 latin 子集：图表里需要等宽 + tabular-nums 的是数字与单位，
+ * 中文标签继续用系统 UI 字体，避免几 MB 的全量字形进安装包。
+ * 许可证文本见 src/renderer/assets/fonts/OFL.txt。
+ */
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('../assets/fonts/jetbrains-mono-latin-400.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('../assets/fonts/jetbrains-mono-latin-500.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   /* ---------------- 原始层：中性色阶（近黑到近白） ---------------- */
   --raw-ink-1000: #04060a;
@@ -72,7 +94,7 @@
 
   /* ---------------- 字体 ---------------- */
   --font-ui: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
-  --font-mono: 'Cascadia Mono', 'JetBrains Mono', Consolas, 'SF Mono', ui-monospace, monospace;
+  --font-mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, 'SF Mono', ui-monospace, monospace;
 
   --text-2xs: 10px;
   --text-xs: 11px;

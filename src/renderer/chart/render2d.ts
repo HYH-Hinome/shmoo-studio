@@ -6,9 +6,12 @@ import {
   binaryMarginColor,
   binarySwatchStops,
   heatGradientStops,
+  inkTone,
   sampleHeatColor,
   valueToT
 } from './colors'
+import type { InkScene, Pt } from './contour'
+import { buildInkScene } from './contour'
 import {
   type ChartGeometry,
   type CellIndex,
@@ -21,16 +24,26 @@ import {
 /**
  * 2D Shmoo 的三层绘制实现（命令式 Canvas 2D，不含 React 状态）。
  *
- * 分层职责（对应执行计划 2.2 / 阶段 ③）：
- *  - staticLayer：背景 + 色块 + 网格线 + 坐标轴 + 图例 + 站点高亮框；
- *  - boundaryLayer：pass/fail 区域边界（只在二值模式、状态变化时重绘）；
- *  - interactionLayer：十字线 + hover 单元格描边，每帧只清这一层。
+ * 分层职责（视觉重做后）：
+ *  - staticLayer：背景（含 vignette）→ 有机墨迹色块 / 逐格色块 → 未知格斜纹
+ *    → 点阵坐标参考 → 噪点纹理 → 数据区边框 → 切片标记 → 坐标轴 → 图例；
+ *  - boundaryLayer：FAIL 区精确边界（墨迹模式）+ 可选的氛围辉光/噪声流动；
+ *  - interactionLayer：十字准线 + hover 格描边 + 涟漪，每帧只清这一层。
  *
- * 性能约束：30×30 = 900 个色块，全部用 fillRect，避免逐格路径与阴影；
- * 动画期间只对 static 层重绘，交互移动只重绘 interaction 层。
+ * 性能约束：
+ *  - 轮廓提取与噪声位移按数据集缓存（contour.ts 内部 WeakMap），不逐帧重算；
+ *  - 逐格填充全部用 fillRect；点阵用一个 Path2D 一次性填充；
+ *  - 静态层只在数据/尺寸/模式变化时重绘，默认状态完全静止。
  */
 
 export type ChartColorMode = 'binary' | 'heat'
+
+/**
+ * 二值模式的两种着色方式：
+ *  - ink：默认。取消逐格实心填充，用有机墨迹轮廓上色，背景给点阵坐标参考；
+ *  - cell：逐格。每格独立填充，用于精确定位单点、确认稀疏数据里某一格的状态。
+ */
+export type ChartRenderMode = 'ink' | 'cell'
 
 /** 画布尺寸（CSS 像素）与设备像素比 */
 export interface CanvasSize {
@@ -67,11 +80,21 @@ export interface MotionInput {
 /** 静态层绘制参数 */
 export interface StaticLayerInput extends ChartDataInput {
   motion: MotionInput
+  /** 二值模式的着色方式；默认 ink（有机墨迹） */
+  renderMode?: ChartRenderMode
   /**
    * 切片标记：从切片视图返回 2D 后仍然保留，提示“刚才看的是这一行/列”。
    * 只画虚线框 + 极淡提亮，不改变色块本身的读数。
    */
   sliceMarker?: { axis: 'row' | 'col'; index: number } | null
+}
+
+/** hover 涟漪参数：从命中点扩散、快速衰减、不留残影 */
+export interface RippleInput {
+  x: number
+  y: number
+  /** 已进行的毫秒数；>= 300 时视为结束 */
+  elapsed: number
 }
 
 /** 交互层绘制参数 */
@@ -85,11 +108,21 @@ export interface InteractionLayerInput {
   hoverRow?: number | null
   /** 悬停格对应的值，用于在十字线端点显示读数（可选） */
   hoverValue?: string | null
+  /** hover 涟漪；null/缺省表示不画（reduced-motion 或未移动） */
+  ripple?: RippleInput | null
 }
 
-/** 结构色字体：等宽，保证刻度数字宽度一致、不抖动 */
-const FONT_MONO = '10px "Cascadia Mono", "JetBrains Mono", Consolas, monospace'
-const FONT_MONO_SMALL = '9px "Cascadia Mono", "JetBrains Mono", Consolas, monospace'
+/** 氛围动效参数：只有用户打开开关才传入 */
+export interface AmbientInput {
+  /** 相位（弧度）；由 rAF 循环推进，约 4s 一个周期 */
+  phase: number
+  /** 噪声纹理偏移量（像素），让轮廓噪声缓慢流动 */
+  drift: number
+}
+
+/** 结构色字体：JetBrains Mono 打包在仓库内（OFL），不依赖系统字体 */
+const FONT_MONO = '10px "JetBrains Mono", "Cascadia Mono", Consolas, monospace'
+const FONT_MONO_SMALL = '9px "JetBrains Mono", "Cascadia Mono", Consolas, monospace'
 
 /** 把 CSS 像素对齐到设备像素，避免 1px 缝隙与半像素模糊 */
 function snap(v: number, dpr: number): number {
@@ -152,29 +185,242 @@ export function drawCellHatch(
   ctx.stroke()
 }
 
-/** 绘制静态层：清屏 → 色块 → 网格线 → 边框 → 坐标轴 → 图例 */
-export function drawStaticLayer(
+/** 墨迹入场：按到图心距离分成 6 层，每层间隔 30ms，同层一起点亮 */
+export const INK_LAYER_COUNT = 6
+export const INK_LAYER_DELAY = 30
+const INK_LAYER_DURATION = 240
+
+/**
+ * 墨迹层的入场不透明度。
+ * 与逐格模式的对角线顺序不同：整块区域按层批量出现，避免大图逐格串行导致总时长失控。
+ */
+export function inkLayerAlpha(layer: number, motion: MotionInput): number {
+  if (!motion.enabled) return 1
+  const startedAt = layer * INK_LAYER_DELAY
+  if (motion.elapsed <= startedAt) return 0
+  return easeOutCubic((motion.elapsed - startedAt) / INK_LAYER_DURATION)
+}
+
+/** 用折线构造闭合路径；points 可能带重复的收尾点，这里统一 closePath */
+function tracePath(target: CanvasRenderingContext2D | Path2D, points: Pt[]): void {
+  if (points.length < 3) return
+  target.moveTo(points[0].x, points[0].y)
+  for (let i = 1; i < points.length; i++) target.lineTo(points[i].x, points[i].y)
+  target.closePath()
+}
+
+/** 取轮廓场景（contour.ts 内部按数据集缓存，重复调用不会重算） */
+function sceneFor(input: ChartDataInput): InkScene {
+  return buildInkScene(input.geometry.x.edges, input.geometry.y.edges, input.site.pass)
+}
+
+/** 点阵坐标参考：每个格子中心 1 个设备像素点，rgba(255,255,255,0.05) */
+function drawDotLattice(ctx: CanvasRenderingContext2D, size: CanvasSize, geometry: ChartGeometry): void {
+  const { dpr } = size
+  const { plot } = geometry
+  const nx = geometry.x.values.length
+  const ny = geometry.y.values.length
+  const dot = 1 / dpr
+
+  const path = new Path2D()
+  for (let iy = 0; iy < ny; iy++) {
+    for (let ix = 0; ix < nx; ix++) {
+      const center = cellCenter(geometry, ix, iy)
+      // 对齐设备像素，保证 1 像素点清晰、不发灰
+      const x = Math.round(center.x * dpr) / dpr
+      const y = Math.round(center.y * dpr) / dpr
+      path.rect(x - dot / 2, y - dot / 2, dot, dot)
+    }
+  }
+  ctx.fillStyle = CHART_STRUCTURE.dotLattice
+  ctx.fill(path)
+  // plot 仅用于语义提示：点阵严格覆盖数据区，不越过边框
+  void plot
+}
+
+/**
+ * 极淡径向 vignette（最大 1.2%）。
+ * 只作用于背景层：必须在色块之前绘制，否则中心与边缘的同色格子观感不一致，会误导判读。
+ */
+function drawVignette(ctx: CanvasRenderingContext2D, geometry: ChartGeometry): void {
+  const { plot } = geometry
+  const cx = plot.x + plot.w / 2
+  const cy = plot.y + plot.h / 2
+  const radius = Math.hypot(plot.w, plot.h) / 2
+  const gradient = ctx.createRadialGradient(cx, cy, radius * 0.25, cx, cy, radius)
+  gradient.addColorStop(0, 'rgba(0, 0, 0, 0)')
+  gradient.addColorStop(1, CHART_STRUCTURE.vignette)
+  ctx.fillStyle = gradient
+  ctx.fillRect(plot.x, plot.y, plot.w, plot.h)
+}
+
+/** 噪点纹理缓存：一次生成 96×96 的白色低透明噪点，重复平铺 */
+let noiseTile: HTMLCanvasElement | null = null
+const noisePatternCache = new WeakMap<CanvasRenderingContext2D, CanvasPattern>()
+
+/** 生成（或复用）噪点纹理画布 */
+function getNoiseTile(): HTMLCanvasElement | null {
+  if (noiseTile) return noiseTile
+  if (typeof document === 'undefined') return null
+  const tile = document.createElement('canvas')
+  tile.width = 96
+  tile.height = 96
+  const tileCtx = tile.getContext('2d')
+  if (!tileCtx) return null
+  const image = tileCtx.createImageData(96, 96)
+  // 固定 LCG 种子：噪点纹理每次运行一致，截图可复现
+  let seed = 20261111
+  for (let i = 0; i < image.data.length; i += 4) {
+    seed = (seed * 1664525 + 1013904223) >>> 0
+    const alpha = (seed >>> 24) % 18 // 0..17，平均约 3.5%，视觉上接近 2%
+    image.data[i] = 255
+    image.data[i + 1] = 255
+    image.data[i + 2] = 255
+    image.data[i + 3] = alpha
+  }
+  tileCtx.putImageData(image, 0, 0)
+  noiseTile = tile
+  return tile
+}
+
+/** 取噪点 pattern（按 ctx 缓存，避免每帧 createPattern） */
+function getNoisePattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
+  const cached = noisePatternCache.get(ctx)
+  if (cached) return cached
+  const tile = getNoiseTile()
+  if (!tile) return null
+  const pattern = ctx.createPattern(tile, 'repeat')
+  if (pattern) noisePatternCache.set(ctx, pattern)
+  return pattern
+}
+
+/** 在数据区叠加约 2% 的噪点纹理（对色块与背景一视同仁，不改变色相） */
+function drawNoiseOverlay(ctx: CanvasRenderingContext2D, geometry: ChartGeometry, alpha = 1): void {
+  const pattern = getNoisePattern(ctx)
+  if (!pattern) return
+  const { plot } = geometry
+  ctx.save()
+  ctx.globalAlpha = alpha
+  ctx.fillStyle = pattern
+  ctx.fillRect(plot.x, plot.y, plot.w, plot.h)
+  ctx.restore()
+}
+
+/**
+ * 墨迹模式：把 PASS / FAIL 连通区画成有层次的色块。
+ *
+ * 画法顺序（保证“硬边 + 柔和墨迹压在外面”）：
+ *  1. 用墨迹轮廓填充高光→阴影的竖向渐变（有仪器金属感的基础层）；
+ *  2. 用同一路径裁剪，逐格叠加 A′ 的 margin 明度色 —— 保留原来的判读编码；
+ *  3. 精确的 1px 边界由 boundary 层负责，不在这里画。
+ */
+function drawInkRegions(
+  ctx: CanvasRenderingContext2D,
+  input: StaticLayerInput,
+  scene: InkScene,
+  dpr: number
+): void {
+  const { geometry, site, motion, tint } = input
+  const { plot } = geometry
+  const nx = geometry.x.values.length
+  const centerX = plot.x + plot.w / 2
+  const centerY = plot.y + plot.h / 2
+  const maxDist = Math.max(1, Math.hypot(plot.w, plot.h) / 2)
+
+  for (const region of scene.regions) {
+    const distance = Math.hypot(region.anchor.x - centerX, region.anchor.y - centerY)
+    const layer = Math.min(INK_LAYER_COUNT - 1, Math.floor((distance / maxDist) * INK_LAYER_COUNT))
+    const alpha = inkLayerAlpha(layer, motion)
+    if (alpha <= 0.002) continue
+
+    const tone = inkTone(region.state)
+    // 每个连通区一条路径：多个环（外轮廓 + 孔洞）一次填充，避免环之间出现接缝
+    const shape = new Path2D()
+    region.exactLoops.forEach((exact, index) => {
+      const ink = region.inkLoops[index]
+      const points = ink ?? exact
+      // 路径上每个环各自 moveTo，避免不同环被连成一条线
+      tracePath(shape, points)
+    })
+
+    ctx.save()
+    ctx.globalAlpha = alpha
+
+    const gradient = ctx.createLinearGradient(0, plot.y, 0, plot.y + plot.h)
+    gradient.addColorStop(0, tone.highlight)
+    gradient.addColorStop(0.42, tone.base)
+    gradient.addColorStop(1, tone.shadow)
+    ctx.fillStyle = gradient
+    ctx.fill(shape)
+    ctx.strokeStyle = tone.edge
+    ctx.lineWidth = 1
+    ctx.stroke(shape)
+
+    // 在墨迹形状内叠加逐格 margin 明度，保证“亮 = 更结实”的编码不丢失
+    ctx.clip(shape)
+    for (const index of region.cells) {
+      const ix = index % nx
+      const iy = (index - ix) / nx
+      const state = site.pass[index]
+      if (state === CELL_UNKNOWN) continue
+      const m = tint ? tint[index] : 0.5
+      const rect = cellRect(geometry, ix, iy)
+      ctx.fillStyle = binaryMarginColor(state, m)
+      // 0.58 让底层的渐变在高光/阴影方向透出更多，逐格的 margin 明度只作为“轻微起伏”，
+      // 不再形成一眼可见的方格拼布（0.82 时整片区域会像贴了瓷砖，和“有机墨迹”冲突）。
+      ctx.globalAlpha = alpha * 0.58
+      // 对齐到设备像素：相邻格共享同一条像素边界，避免 +0.5 重叠导致的重叠处二次叠加，
+      // 那样会在整片色块里透出规则的方格缝（放大看就是“拼布”）。
+      const left = snap(rect.x, dpr)
+      const top = snap(rect.y, dpr)
+      const right = snap(rect.x + rect.w, dpr)
+      const bottom = snap(rect.y + rect.h, dpr)
+      ctx.fillRect(left, top, right - left, bottom - top)
+    }
+
+    ctx.restore()
+  }
+}
+
+/** 未知格：深底 + 45° 斜纹；墨迹模式下必须盖在墨迹之上，表达“没有数据” */
+function drawUnknownCells(
   ctx: CanvasRenderingContext2D,
   size: CanvasSize,
   input: StaticLayerInput
 ): void {
-  const { geometry, site, mode, motion, tint } = input
-  const { plot } = geometry
-  const { dpr, width, height } = size
-
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  ctx.clearRect(0, 0, width, height)
-
-  // 1. 画布底色：比面板更暗，让色块成为唯一视觉焦点
-  ctx.fillStyle = CHART_STRUCTURE.canvasBg
-  ctx.fillRect(0, 0, width, height)
-
-  if (plot.w <= 2 || plot.h <= 2) return
-
+  const { geometry, site, motion } = input
+  const { dpr } = size
   const nx = geometry.x.values.length
   const ny = geometry.y.values.length
 
-  // 2. 色块（行优先：index = iy * nx + ix）
+  for (let iy = 0; iy < ny; iy++) {
+    for (let ix = 0; ix < nx; ix++) {
+      const index = iy * nx + ix
+      if (site.pass[index] !== CELL_UNKNOWN) continue
+      const alpha = cellAlpha(ix, iy, nx, ny, motion)
+      if (alpha <= 0.002) continue
+
+      const rect = cellRect(geometry, ix, iy)
+      const left = snap(rect.x, dpr)
+      const top = snap(rect.y, dpr)
+      const right = snap(rect.x + rect.w, dpr)
+      const bottom = snap(rect.y + rect.h, dpr)
+      ctx.globalAlpha = alpha
+      ctx.fillStyle = BINARY_PALETTE.unknownBase
+      ctx.fillRect(left, top, right - left, bottom - top)
+      drawCellHatch(ctx, left, top, right - left, bottom - top)
+    }
+  }
+  ctx.globalAlpha = 1
+}
+
+/** 逐格模式：每格独立填充（原 A′ 视觉，保留给精确判读） */
+function drawCells(ctx: CanvasRenderingContext2D, size: CanvasSize, input: StaticLayerInput): void {
+  const { geometry, site, mode, motion, tint } = input
+  const { dpr } = size
+  const nx = geometry.x.values.length
+  const ny = geometry.y.values.length
+
   for (let iy = 0; iy < ny; iy++) {
     for (let ix = 0; ix < nx; ix++) {
       const index = iy * nx + ix
@@ -212,24 +458,72 @@ export function drawStaticLayer(
     }
   }
   ctx.globalAlpha = 1
+}
 
-  // 3. 单元格分隔线：低对比网格线，只做“矩阵感”暗示
-  ctx.strokeStyle = CHART_STRUCTURE.gridLine
-  ctx.lineWidth = 1
-  ctx.beginPath()
-  for (let ix = 0; ix <= nx; ix++) {
-    const x = snap(geometry.x.edges[ix], dpr) + 0.5 / dpr
-    ctx.moveTo(x, plot.y)
-    ctx.lineTo(x, plot.y + plot.h)
-  }
-  for (let iy = 0; iy <= ny; iy++) {
-    const y = snap(geometry.y.edges[iy], dpr) + 0.5 / dpr
-    ctx.moveTo(plot.x, y)
-    ctx.lineTo(plot.x + plot.w, y)
-  }
-  ctx.stroke()
 
-  // 4. 数据区边框 + 当前站点高亮框（内缩 3px，青色细线，不抢色块）
+/**
+ * 绘制静态层：背景（含 vignette）→ 墨迹/逐格色块 → 缺测格斜纹
+ *                → 点阵/网格 → 噪点 → 边框 → 切片标记 → 坐标轴 → 图例
+ */
+export function drawStaticLayer(
+  ctx: CanvasRenderingContext2D,
+  size: CanvasSize,
+  input: StaticLayerInput
+): void {
+  const { geometry, mode, renderMode = 'ink' } = input
+  const { plot } = geometry
+  const { dpr, width, height } = size
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, width, height)
+
+  // 1. 画布底色：比面板更暗，让色块成为唯一视觉焦点
+  ctx.fillStyle = CHART_STRUCTURE.canvasBg
+  ctx.fillRect(0, 0, width, height)
+
+  if (plot.w <= 2 || plot.h <= 2) return
+
+  const nx = geometry.x.values.length
+  const ny = geometry.y.values.length
+  // 墨迹只用于二值模式：热力是连续场，没有“FAIL 连通区”这个概念
+  const useInk = mode === 'binary' && renderMode === 'ink'
+
+  // 2. 背景层 vignette：必须在色块之前，保证不压在数据上（≤1.2%）
+  drawVignette(ctx, geometry)
+
+  // 3. 色块
+  if (useInk) {
+    drawInkRegions(ctx, input, sceneFor(input), dpr)
+    // 未知格永远盖在墨迹上（墨迹不会侵入缺测格，但边界处仍需要斜纹表达“未测”）
+    drawUnknownCells(ctx, size, input)
+  } else {
+    drawCells(ctx, size, input)
+  }
+
+  // 4. 坐标参考：墨迹模式用 1px 点阵；逐格模式保留原来的矩阵网格线
+  if (useInk) {
+    drawDotLattice(ctx, size, geometry)
+  } else {
+    ctx.strokeStyle = CHART_STRUCTURE.gridLine
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    for (let ix = 0; ix <= nx; ix++) {
+      const x = snap(geometry.x.edges[ix], dpr) + 0.5 / dpr
+      ctx.moveTo(x, plot.y)
+      ctx.lineTo(x, plot.y + plot.h)
+    }
+    for (let iy = 0; iy <= ny; iy++) {
+      const y = snap(geometry.y.edges[iy], dpr) + 0.5 / dpr
+      ctx.moveTo(plot.x, y)
+      ctx.lineTo(plot.x + plot.w, y)
+    }
+    ctx.stroke()
+  }
+
+  // 5. 整个数据区叠约 2% 噪点纹理（含墨迹与空白，模拟仪器屏幕的颗粒感）
+  drawNoiseOverlay(ctx, geometry)
+
+  // 6. 数据区边框 + 当前站点高亮框（内缩 3px，青色细线，不抢色块）
   ctx.strokeStyle = CHART_STRUCTURE.axisLine
   ctx.strokeRect(snap(plot.x, dpr) + 0.5 / dpr, snap(plot.y, dpr) + 0.5 / dpr, plot.w, plot.h)
   ctx.strokeStyle = CHART_STRUCTURE.activeFrame
@@ -240,12 +534,12 @@ export function drawStaticLayer(
     plot.h - 7
   )
 
-  // 5. 切片标记：虚线框标出刚才切出去的那一行/列（仅在返回 2D 后出现）
+  // 7. 切片标记：虚线框标出刚才切出去的那一行/列（仅在返回 2D 后出现）
   drawSliceMarker(ctx, size, input)
 
-  // 6. 坐标轴（刻度对齐真实采样值）
+  // 8. 坐标轴（刻度对齐真实采样值）
   drawAxes(ctx, size, input)
-  // 7. 图例
+  // 9. 图例
   drawLegend(ctx, size, input)
 }
 
@@ -539,15 +833,24 @@ function drawLegend(
 }
 
 /**
- * 边界层：在 pass / fail 相邻处画线段，形成“阶梯状”通过区轮廓。
- * 只连接两种“已判定”状态，缺失点不参与，避免边界绕着一堆空洞抖动。
+ * 边界层：精确边界 + （可选）氛围动效。
+ *
+ * 墨迹模式：直接用 contour.ts 的**精确轮廓**（marching squares 输出，落在真实格子边界上）
+ * 描 1px 极淡白线。它和静态层的墨迹形状是同一份数据源，但位置一格不差；
+ * 视觉上形成“一条硬边 + 一层柔和墨迹压在外面”，而不是两条互相打架的线。
+ *
+ * 逐格模式：保留原来的“相邻状态不同即画边”的阶梯边界。
+ *
+ * 氛围动效（默认关闭）：FAIL 区辉光呼吸 + 轮廓噪声缓慢流动。
+ * 只在这一层重绘，不触碰静态层的色块，因此开启时仍然只有很小的绘制面积。
  */
 export function drawBoundaryLayer(
   ctx: CanvasRenderingContext2D,
   size: CanvasSize,
-  input: StaticLayerInput
+  input: StaticLayerInput,
+  ambient?: AmbientInput | null
 ): void {
-  const { geometry, site, mode, motion } = input
+  const { geometry, site, mode, motion, renderMode = 'ink' } = input
   const { dpr, width, height } = size
   const { plot } = geometry
 
@@ -563,12 +866,56 @@ export function drawBoundaryLayer(
   const alpha = motion.enabled ? Math.min(1, Math.max(0, (motion.elapsed - motion.delaySpan) / 320)) : 1
   if (alpha <= 0) return
 
+  ctx.lineWidth = 1
+  ctx.globalAlpha = alpha
+
+  if (renderMode === 'ink') {
+    const scene = sceneFor(input)
+    const failShape = new Path2D()
+    let hasFail = false
+    for (const region of scene.regions) {
+      if (region.state !== 'fail') continue
+      for (const loop of region.exactLoops) {
+        tracePath(failShape, loop)
+        hasFail = true
+      }
+    }
+
+    // 1px 精确边界：位置即数据边界，不做任何位移/平滑
+    ctx.strokeStyle = CHART_STRUCTURE.exactBoundary
+    ctx.stroke(failShape)
+
+    // —— 氛围动效：只在显式开启时绘制 ——
+    if (ambient && hasFail) {
+      const breathe = 0.5 + 0.5 * Math.sin(ambient.phase)
+      ctx.save()
+      ctx.globalCompositeOperation = 'lighter'
+      ctx.fillStyle = `rgba(192, 69, 62, ${(0.035 + breathe * 0.05).toFixed(4)})`
+      ctx.fill(failShape)
+      ctx.restore()
+
+      // 轮廓噪声流动：裁剪到 FAIL 形状内，平移噪点 pattern，不重建路径
+      const pattern = getNoisePattern(ctx)
+      if (pattern && typeof DOMMatrix !== 'undefined') {
+        const matrix = new DOMMatrix().translate(ambient.drift, ambient.drift * 0.6)
+        pattern.setTransform(matrix)
+        ctx.save()
+        ctx.clip(failShape)
+        ctx.globalAlpha = 0.06
+        ctx.fillStyle = pattern
+        ctx.fillRect(plot.x, plot.y, plot.w, plot.h)
+        ctx.restore()
+      }
+    }
+    ctx.globalAlpha = 1
+    return
+  }
+
+  // ---- 逐格模式：相邻状态不同的格子边界 ----
   const stateAt = (ix: number, iy: number): number => site.pass[iy * nx + ix]
   const known = (s: number) => s !== CELL_UNKNOWN
 
   ctx.strokeStyle = CHART_STRUCTURE.boundary
-  ctx.globalAlpha = alpha
-  ctx.lineWidth = 1
   ctx.beginPath()
 
   // 垂直边：左右相邻状态不同
@@ -601,7 +948,10 @@ export function drawBoundaryLayer(
   ctx.globalAlpha = 1
 }
 
-/** 交互层：十字线 + hover 单元格描边；每帧全清（面积小，成本可忽略） */
+/** 涟漪持续时间（ms）：快速衰减，不留残影 */
+const RIPPLE_DURATION = 300
+
+/** 交互层：十字准线（贯穿全图） + hover 格描边 + 涟漪；每帧全清 */
 export function drawInteractionLayer(
   ctx: CanvasRenderingContext2D,
   size: CanvasSize,
@@ -629,10 +979,45 @@ export function drawInteractionLayer(
   const cx = snap(center.x, dpr)
   const cy = snap(center.y, dpr)
 
-  // 十字线：吸附到格子中心，虚线，低亮度
-  ctx.strokeStyle = CHART_STRUCTURE.crosshair
+  // 涟漪：从命中点扩散的细环 + 极淡径向填充，300ms 内衰减到 0
+  const ripple = input.ripple
+  if (ripple && ripple.elapsed >= 0 && ripple.elapsed < RIPPLE_DURATION) {
+    const t = ripple.elapsed / RIPPLE_DURATION
+    const radius = 6 + t * Math.min(140, Math.max(plot.w, plot.h) * 0.22)
+    const fade = (1 - t) * (1 - t)
+
+    const gradient = ctx.createRadialGradient(ripple.x, ripple.y, 0, ripple.x, ripple.y, radius)
+    gradient.addColorStop(0, `rgba(111, 227, 239, ${(0.16 * fade).toFixed(4)})`)
+    gradient.addColorStop(0.7, `rgba(111, 227, 239, ${(0.05 * fade).toFixed(4)})`)
+    gradient.addColorStop(1, 'rgba(111, 227, 239, 0)')
+    ctx.fillStyle = gradient
+    ctx.beginPath()
+    ctx.arc(ripple.x, ripple.y, radius, 0, Math.PI * 2)
+    ctx.fill()
+
+    ctx.strokeStyle = `rgba(111, 227, 239, ${(0.45 * fade).toFixed(4)})`
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.arc(ripple.x, ripple.y, radius, 0, Math.PI * 2)
+    ctx.stroke()
+  }
+
+  // 十字准线：贯穿全图（图框外更淡），吸附到格子中心，虚线
   ctx.lineWidth = 1
   ctx.setLineDash([3, 3])
+  ctx.strokeStyle = CHART_STRUCTURE.crosshairSoft
+  ctx.beginPath()
+  ctx.moveTo(cx + 0.5 / dpr, 0)
+  ctx.lineTo(cx + 0.5 / dpr, plot.y)
+  ctx.moveTo(cx + 0.5 / dpr, plot.y + plot.h)
+  ctx.lineTo(cx + 0.5 / dpr, height)
+  ctx.moveTo(0, cy + 0.5 / dpr)
+  ctx.lineTo(plot.x, cy + 0.5 / dpr)
+  ctx.moveTo(plot.x + plot.w, cy + 0.5 / dpr)
+  ctx.lineTo(width, cy + 0.5 / dpr)
+  ctx.stroke()
+
+  ctx.strokeStyle = CHART_STRUCTURE.crosshair
   ctx.beginPath()
   ctx.moveTo(cx + 0.5 / dpr, plot.y)
   ctx.lineTo(cx + 0.5 / dpr, plot.y + plot.h)

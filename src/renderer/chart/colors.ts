@@ -78,9 +78,54 @@ export const CHART_STRUCTURE = {
   // 缺失格斜纹：20% 在 DPR=2 下几乎不可见，提高到 32%（仅出现在缺失格上）
   hatchStroke: 'rgba(147, 166, 186, 0.32)',
   crosshair: 'rgba(56, 207, 224, 0.55)',
+  /** 十字准线在图框之外的部分：贯穿全图，但不抢图框内的注意力 */
+  crosshairSoft: 'rgba(56, 207, 224, 0.18)',
   hoverBorder: '#6fe3ef',
-  boundary: 'rgba(230, 238, 247, 0.52)'
+  boundary: 'rgba(230, 238, 247, 0.52)',
+  /** 墨迹模式的精确边界：1px 极淡白线，只做判读基准，不做装饰 */
+  exactBoundary: 'rgba(230, 238, 247, 0.26)',
+  /** 墨迹模式的坐标参考点阵：1 设备像素、5% 白 */
+  dotLattice: 'rgba(255, 255, 255, 0.05)',
+  /** 背景 vignette：≤1.2%，且只画在色块之前 */
+  vignette: 'rgba(0, 0, 0, 0.012)'
 } as const
+
+/**
+ * 墨迹模式的“仪器色”层次：同色相的高光 / 基色 / 阴影。
+ *
+ * 目的不是换色相，而是把原来平涂的饱和色块拆成三段明度，
+ * 让大块 FAIL/PASS 区域有金属/玻璃仪表的纵深。红仍是红、青绿仍是青绿。
+ */
+export interface InkTone {
+  /** 区域顶部的高光（比锚点略亮、略降饱和） */
+  highlight: string
+  /** 中段基色 */
+  base: string
+  /** 底部阴影 */
+  shadow: string
+  /** 墨迹外缘描边（很淡，给形状一点“墨”的厚度） */
+  edge: string
+}
+
+const INK_TONES: Record<'pass' | 'fail', InkTone> = {
+  pass: {
+    highlight: '#3aa79a',
+    base: '#1d746b',
+    shadow: '#0a2422',
+    edge: 'rgba(58, 167, 154, 0.30)'
+  },
+  fail: {
+    highlight: '#c65a51',
+    base: '#8b3630',
+    shadow: '#280f0d',
+    edge: 'rgba(198, 90, 81, 0.34)'
+  }
+}
+
+/** 取墨迹层次色；state 只能是 pass / fail（未知格不走墨迹） */
+export function inkTone(state: 'pass' | 'fail'): InkTone {
+  return INK_TONES[state]
+}
 
 /** #rrggbb → [r,g,b] */
 export function hexToRgb(hex: string): [number, number, number] {
