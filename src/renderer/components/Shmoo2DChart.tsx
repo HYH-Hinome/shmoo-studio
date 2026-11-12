@@ -1,17 +1,33 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
+import type {
+  CSSProperties,
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent
+} from 'react'
 import type { Axis, ShmooDataset, SiteGrid } from '@shared/types/shmoo'
 import { CELL_FAIL, CELL_PASS } from '@shared/types/shmoo'
-import { DEFAULT_PADDING, cellCenter, computeGeometry, hitTest, tickDecimals } from '../chart/geometry'
+import { DEFAULT_PADDING, cellCenter, cellRect, computeGeometry, hitTest, tickDecimals } from '../chart/geometry'
 import type { CellIndex, ChartGeometry } from '../chart/geometry'
 import { drawBoundaryLayer, drawInteractionLayer, drawStaticLayer, ENTRANCE_TOTAL } from '../chart/render2d'
 import type { ChartColorMode, MotionInput } from '../chart/render2d'
 import type { SliceRef } from '../chart/slice'
 import { computeMarginTints } from '../chart/colors'
-import { isFlatBinaryDataset } from '@shared/spec/evaluate'
+import { isFlatBinaryDataset, isMarginMeaningful, evaluatePoint } from '@shared/spec/evaluate'
 import type { ChartPerf } from '../chart/perf'
 import { useLayeredCanvas } from '../chart/useLayeredCanvas'
 import type { LayerName, LayerRenderer } from '../chart/useLayeredCanvas'
+import {
+  TOOLTIP_HEIGHT,
+  TOOLTIP_WIDTH,
+  classifyClick,
+  computeTooltipPlacement,
+  moveCell,
+  normalizeBox,
+  rowEdgeCell
+} from '../chart/interaction'
+import type { ClickRecord } from '../chart/interaction'
+import { useAppStore } from '../state/store'
+import { formatSigned } from '../lib/format'
 
 /**
  * 2D Shmoo 图表组件。
@@ -19,7 +35,16 @@ import type { LayerName, LayerRenderer } from '../chart/useLayeredCanvas'
  * 结构：一个定位容器 + 三层叠放的 canvas（静态 / 边界 / 交互）+ 一个 DOM 浮层。
  *  - 静态层：色块、坐标轴、图例、高亮框 —— 数据/spec/尺寸/配色变化时重绘；
  *  - 边界层：pass/fail 轮廓 —— 只在二值模式绘制；
- *  - 交互层：十字线与 hover 格描边 —— 每帧只清这一层，静止时不产生任何绘制。
+ *  - 交互层：十字线、hover/锁定描边、框选与涟漪 —— 每帧只清这一层，静止时不产生任何绘制。
+ *
+ * 阶段 ⑤ 的交互规则：
+ *  1. 悬停：十字线贯穿全图，浮层显示坐标 / 状态 / value / margin，靠近边缘自动翻转；
+ *  2. 单击锁定：浮层常显、格子加高亮描边，再次单击同一格解除；锁定后鼠标移动不再改读数；
+ *  3. 键盘：方向键移格、Home/End 行首行尾、Shift+方向键扩展框选、Esc 解除、
+ *     Enter/Space 锁定当前格；容器可聚焦，纯键盘可完成“选格 → 锁定 → 读数 → 解除”；
+ *  4. 拖拽框选：按下后移动形成矩形，状态栏显示区域统计；Esc 或再次单击清除；
+ *  5. 单击 / 双击区分：同一格 250ms 内的第二次点击才判为双击（切片），
+ *     第一次点击的锁定会延迟到判定窗口后再执行，因此不会互相误触发。
  *
  * 入场动画只用 rAF 驱动 canvas，动画状态不进 React state，
  * 因此不会因为逐帧 setState 触发组件树重渲染。
@@ -34,11 +59,8 @@ const ENTRANCE_SETTLE = ENTRANCE_TOTAL + 60
 const RIPPLE_MS = 300
 /** 氛围动效目标帧率：约 20fps，靠跳帧实现，不做全量逐帧重绘 */
 const AMBIENT_FRAME_MS = 50
-/** hover 浮层与格中心的间距（px） */
-const TOOLTIP_OFFSET = 14
-/** hover 浮层尺寸估算，用于判断是否翻转方向（与 CSS 中宽度一致） */
-const TOOLTIP_WIDTH = 178
-const TOOLTIP_HEIGHT = 104
+/** 拖拽判定阈值（px）：小于该距离视为单击，避免手抖把单击变成 1 格框选 */
+const DRAG_THRESHOLD = 4
 
 interface Shmoo2DChartProps {
   dataset: ShmooDataset
@@ -103,6 +125,14 @@ export function Shmoo2DChart({
 }: Shmoo2DChartProps): JSX.Element {
   const reducedMotion = useReducedMotion()
 
+  // ---- 锁定 / 框选：低频状态放 store，状态栏也能读到框选统计 ----
+  const selection = useAppStore((s) => s.selection)
+  const box = useAppStore((s) => s.box)
+  const toggleSelection = useAppStore((s) => s.toggleSelection)
+  const setSelection = useAppStore((s) => s.setSelection)
+  const setBox = useAppStore((s) => s.setBox)
+  const clearInteraction = useAppStore((s) => s.clearInteraction)
+
   // ---- 绘制阶段需要的最新状态（用 ref 保存，renderers 只依赖 ref，不会因 state 变化重建） ----
   const geometryRef = useRef<ChartGeometry | null>(null)
   const motionRef = useRef<MotionInput>({ enabled: false, elapsed: 0 })
@@ -120,11 +150,28 @@ export function Shmoo2DChart({
   hoverRef.current = hover
   hoverVisibleRef.current = hoverVisible
 
+  // 锁定 / 框选也要能被 renderer 同步读到（renderers 是 useMemo 缓存的，不能依赖 state 闭包）
+  const selectionRef = useRef<CellIndex | null>(selection)
+  const boxRef = useRef(box)
+  selectionRef.current = selection
+  boxRef.current = box
+
   // hover 涟漪：起点 + 开始时间；动画进度只放在 ref 里，不触发 React 重渲染
   const rippleRef = useRef<{ x: number; y: number; startedAt: number } | null>(null)
   const rippleRafRef = useRef(0)
   /** 涟漪进度（ms），绘制时读取；null 表示不画 */
   const rippleElapsedRef = useRef<number | null>(null)
+
+  // 拖拽框选：记录起点与“是否已经移动超过阈值”
+  const dragRef = useRef<{
+    anchor: CellIndex
+    startX: number
+    startY: number
+    moved: boolean
+  } | null>(null)
+  // 单击延迟锁定：给双击判定留出 250ms 窗口
+  const clickTimerRef = useRef<number | null>(null)
+  const lastClickRef = useRef<ClickRecord | null>(null)
 
   const recordTiming = useCallback((key: 'static' | 'boundary' | 'interaction', ms: number) => {
     pushSample(perfRef.current[key], ms)
@@ -194,19 +241,24 @@ export function Shmoo2DChart({
         const geometry = geometryRef.current
         if (!geometry) return
         const startedAt = performance.now()
-        const active = hoverVisibleRef.current ? hoverRef.current : null
+        const lockedCell = selectionRef.current
+        const boxSel = boxRef.current
+        // 锁定优先：锁定后准线与描边固定在锁定格，鼠标移动不再改变显示；
+        // 框选期间则完全不显示 hover，避免遮挡正在比较的区域。
+        const active = boxSel
+          ? null
+          : lockedCell ?? (hoverVisibleRef.current ? hoverRef.current : null)
         const origin = rippleRef.current
         const elapsed = rippleElapsedRef.current
         drawInteractionLayer(ctx, size, {
           geometry,
           hover: active,
-          // 悬停整行提示：只依赖当前格子的行号，hover 变化时重绘这一层即可
-          hoverRow: active ? active.iy : null,
+          // 整行提示只在“未锁定、未框选”的普通悬停时显示
+          hoverRow: active && !lockedCell ? active.iy : null,
           // 涟漪：起点与进度都来自 ref，避免逐帧 setState
-          ripple:
-            origin && elapsed !== null
-              ? { x: origin.x, y: origin.y, elapsed }
-              : null
+          ripple: origin && elapsed !== null ? { x: origin.x, y: origin.y, elapsed } : null,
+          locked: lockedCell,
+          box: boxSel ? normalizeBox(boxSel.anchor, boxSel.focus) : null
         })
         recordTiming('interaction', performance.now() - startedAt)
       }
@@ -256,10 +308,10 @@ export function Shmoo2DChart({
     // 尺寸从 0 变为有效值时也要启动；真正改变宽高不重新播放入场动画
   }, [dataset.id, dataset.revision, site.siteId, mode, reducedMotion, size.width > 0, size.height > 0, repaint])
 
-  // hover 变化 → 只重绘交互层
+  // hover / 锁定 / 框选变化 → 只重绘交互层（静态层与边界层完全不碰）
   useEffect(() => {
     repaint('interaction')
-  }, [hover, hoverVisible, repaint])
+  }, [hover, hoverVisible, selection, box, repaint])
 
   // 氛围动效：默认关闭。开启后用 rAF 推进相位，但只重绘边界层（≈20fps），
   // 静态色块层保持不动；关闭时立即停止循环并清掉相位，画面回到完全静止。
@@ -315,10 +367,11 @@ export function Shmoo2DChart({
     }
   }, [repaint])
 
-  // 卸载时清理涟漪 rAF，避免访问已销毁的 canvas
+  // 卸载时清理涟漪 rAF 与待执行的单击定时器，避免访问已销毁的 canvas / 已切换的视图
   useEffect(() => {
     return () => {
       if (rippleRafRef.current) window.cancelAnimationFrame(rippleRafRef.current)
+      if (clickTimerRef.current !== null) window.clearTimeout(clickTimerRef.current)
     }
   }, [])
 
@@ -327,6 +380,19 @@ export function Shmoo2DChart({
     repaint('static')
   }, [sliceMarker, repaint])
 
+  // 切换站点 / 数据集时清空本地 hover（store 负责清空锁定与框选），
+  // 避免旧的 hover 索引在新网格里指到别的格子。
+  useEffect(() => {
+    setHover(null)
+    setHoverVisible(false)
+    dragRef.current = null
+    lastClickRef.current = null
+    if (clickTimerRef.current !== null) {
+      window.clearTimeout(clickTimerRef.current)
+      clickTimerRef.current = null
+    }
+  }, [site.siteId, dataset.id])
+
   // 开发模式下把耗时采样挂到 window，供浏览器自动化实测读取（生产构建不执行）
   useEffect(() => {
     if (!import.meta.env.DEV) return
@@ -334,6 +400,9 @@ export function Shmoo2DChart({
   }, [])
 
   // ---- 指针交互 ----
+  const nx = xAxis.values.length
+  const ny = yAxis.values.length
+
   /**
    * 把鼠标坐标换算成格子索引。
    * getBoundingClientRect 含边框，clientLeft/clientTop 是边框宽度，需要减掉才是画布内坐标。
@@ -383,7 +452,58 @@ export function Shmoo2DChart({
     [reducedMotion, repaint]
   )
 
+  /** 取消尚未执行的单击锁定（双击到达或视图切换时调用） */
+  const cancelPendingLock = (): void => {
+    if (clickTimerRef.current !== null) {
+      window.clearTimeout(clickTimerRef.current)
+      clickTimerRef.current = null
+    }
+  }
+
+  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    // 只处理左键；右键与中键不参与读数
+    if (event.button !== 0) return
+    // 让容器拿到焦点，点击之后可以直接用键盘继续移动 / 锁定
+    containerRef.current?.focus({ preventScroll: true })
+    const cell = cellFromPoint(event.clientX, event.clientY)
+    if (!cell) return
+
+    // 开始新拖拽：先清掉旧框选，避免“新增框选”与旧区域混在一起
+    if (boxRef.current) setBox(null)
+    dragRef.current = {
+      anchor: cell,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false
+    }
+  }
+
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const drag = dragRef.current
+    if (drag) {
+      const moved =
+        drag.moved ||
+        Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) >= DRAG_THRESHOLD
+      if (!moved) return
+      const cell = cellFromPoint(event.clientX, event.clientY)
+      if (!cell) return
+      if (!drag.moved) {
+        // 第一次真正拖出框：解除旧的锁定，避免锁定描边与框选混在一起
+        setSelection(null)
+      }
+      drag.moved = true
+      // 框选期间不显示 hover 浮层，避免浮层盖住正在比较的区域
+      if (hoverVisible) setHoverVisible(false)
+      setBox({ anchor: drag.anchor, focus: cell })
+      return
+    }
+
+    // 已有框选或已锁定：鼠标移动不改变读数，直接返回（也避免无意义重绘）
+    if (boxRef.current || selectionRef.current) {
+      if (hoverVisible) setHoverVisible(false)
+      return
+    }
+
     const cell = cellFromPoint(event.clientX, event.clientY)
     if (!cell) {
       // 指针在轴/图例/留白上：隐藏十字线与浮层，但不立即清空 hover 数据（浮层需要淡出）
@@ -400,59 +520,163 @@ export function Shmoo2DChart({
     if (!hoverVisible) setHoverVisible(true)
   }
 
-  /**
-   * 双击切片。
-   *
-   * 事件顺序说明：阶段 ⑤ 会加入“单击锁定”，届时单击处理需要延迟到双击判定窗口之后
-   * （约 250ms）再执行；这里不注册 onClick，因此不会吞掉双击，也无需 preventDefault。
-   * 用原生 dblclick 而不是自己数两次 pointerdown，触摸板轻点与高 DPI 屏都能稳定触发。
-   */
-  const handleDoubleClick = (event: ReactMouseEvent<HTMLDivElement>): void => {
-    if (!onSlice) return
-    const cell = cellFromPoint(event.clientX, event.clientY)
-    if (!cell) return
-    // 默认切“行”（固定 y 扫 x）；列方向在切片视图里用标签切换
-    onSlice({ axis: 'row', index: cell.iy })
+  const handlePointerUp = (): void => {
+    const drag = dragRef.current
+    dragRef.current = null
+    if (!drag) return
+
+    // 拖出了矩形：保留框选，不触发单击锁定
+    if (drag.moved) {
+      cancelPendingLock()
+      lastClickRef.current = null
+      return
+    }
+
+    // 未移动 = 一次单击。先判断是否属于双击（250ms 内的同格第二次点击）。
+    const now = performance.now()
+    const verdict = classifyClick(lastClickRef.current, drag.anchor, now)
+    if (verdict === 'double') {
+      // 双击：取消第一次点击排队中的锁定，直接进入切片。
+      // 这样“单击锁定”与“双击切片”不会互相误触发。
+      cancelPendingLock()
+      lastClickRef.current = null
+      onSlice?.({ axis: 'row', index: drag.anchor.iy })
+      return
+    }
+
+    lastClickRef.current = { cell: drag.anchor, time: now }
+    // 延迟 250ms 执行锁定切换：窗口内若来了第二次点击，会在上面被取消
+    cancelPendingLock()
+    const target = drag.anchor
+    clickTimerRef.current = window.setTimeout(() => {
+      clickTimerRef.current = null
+      toggleSelection(target)
+    }, 250)
   }
 
   const handlePointerLeave = (): void => {
-    setHoverVisible(false)
+    dragRef.current = null
+    if (!selectionRef.current) setHoverVisible(false)
   }
 
-  // ---- hover 读数与浮层定位 ----
-  const nx = xAxis.values.length
-  const hoverIndex = hover ? hover.iy * nx + hover.ix : -1
-  const hoverValue = hover && hoverIndex >= 0 ? site.value[hoverIndex] : Number.NaN
-  const hoverState = hover && hoverIndex >= 0 ? site.pass[hoverIndex] : null
+  /**
+   * 键盘导航。
+   * 基础格 = 锁定格 → 当前 hover → 网格中心；
+   * Shift+方向键只在已有锁定格时生效（从锁定格作为锚点扩展框选）。
+   */
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (nx <= 0 || ny <= 0) return
+
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      cancelPendingLock()
+      lastClickRef.current = null
+      clearInteraction()
+      setHoverVisible(false)
+      return
+    }
+
+    const base =
+      selection ?? hover ?? { ix: Math.floor((nx - 1) / 2), iy: Math.floor((ny - 1) / 2) }
+    const isArrow =
+      event.key === 'ArrowLeft' ||
+      event.key === 'ArrowRight' ||
+      event.key === 'ArrowUp' ||
+      event.key === 'ArrowDown'
+    const isEdge = event.key === 'Home' || event.key === 'End'
+
+    if (isArrow || isEdge) {
+      event.preventDefault()
+      const dx = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : 0
+      // 几何约定“行 0 在底部”：上箭头 = iy + 1，下箭头 = iy - 1
+      const dy = event.key === 'ArrowUp' ? 1 : event.key === 'ArrowDown' ? -1 : 0
+      const next = isEdge
+        ? rowEdgeCell(base, event.key === 'Home' ? 'start' : 'end', nx)
+        : moveCell(base, dx, dy, nx, ny)
+
+      if (event.shiftKey) {
+        // Shift：以锁定格为锚点扩展框选；没有锁定格时先执行普通移动
+        if (selection) {
+          setBox({ anchor: selection, focus: next })
+          setHoverVisible(false)
+        }
+        return
+      }
+
+      if (selection) {
+        // 已锁定：方向键移动锁定目标，浮层跟着走（保持常显）
+        setSelection(next)
+      } else {
+        setHover(next)
+        setHoverVisible(true)
+      }
+      return
+    }
+
+    if (event.key === 'Enter' || event.key === ' ') {
+      // 纯键盘锁定 / 解除：与单击同一个入口，保证语义一致
+      event.preventDefault()
+      toggleSelection(base)
+      setHoverVisible(false)
+    }
+  }
+
+  // ---- 浮层读数与定位 ----
+  // 锁定后以锁定格为准：鼠标移动不再改变读数（“腾出手记数据”）
+  const safeSelection =
+    selection && selection.ix >= 0 && selection.ix < nx && selection.iy >= 0 && selection.iy < ny
+      ? selection
+      : null
+  const boxActive = box !== null
+  const displayCell = boxActive ? null : safeSelection ?? (hoverVisible ? hover : null)
+  const tipVisible = displayCell !== null
+
+  const displayIndex = displayCell ? displayCell.iy * nx + displayCell.ix : -1
+  const displayValue = displayCell && displayIndex >= 0 ? site.value[displayIndex] : Number.NaN
+  const displayState = displayCell && displayIndex >= 0 ? site.pass[displayIndex] : null
 
   const stateLabel =
-    hoverState === CELL_PASS ? 'PASS' : hoverState === CELL_FAIL ? 'FAIL' : 'NO DATA'
+    displayState === CELL_PASS ? 'PASS' : displayState === CELL_FAIL ? 'FAIL' : 'NO DATA'
   const stateClass =
-    hoverState === CELL_PASS ? 'pass' : hoverState === CELL_FAIL ? 'fail' : 'unknown'
+    displayState === CELL_PASS ? 'pass' : displayState === CELL_FAIL ? 'fail' : 'unknown'
 
   const xDecimals = useMemo(() => tickDecimals(xAxis.values), [xAxis.values])
   const yDecimals = useMemo(() => tickDecimals(yAxis.values), [yAxis.values])
 
+  // margin 文案：二值 / 零宽窗口数据只显示“不适用”，不输出假数字
+  const marginText = useMemo(() => {
+    if (!displayCell) return '不适用'
+    if (!isMarginMeaningful(dataset)) return '不适用'
+    if (!Number.isFinite(displayValue)) return '—'
+    const { margin } = evaluatePoint(displayValue, dataset.spec)
+    if (margin === null || !Number.isFinite(margin)) return '—'
+    const unit = dataset.valueUnit ? ` ${dataset.valueUnit}` : ''
+    return `${formatSigned(margin)}${unit}`
+  }, [displayCell, dataset, displayValue])
+
   const tooltipStyle = useMemo<CSSProperties>(() => {
-    if (!hover) return { display: 'none' }
-    const center = cellCenter(geometry, hover.ix, hover.iy)
-    // 靠近右/下边缘时翻转到格子的另一侧，保证浮层始终在容器内
-    const flipX = center.x + TOOLTIP_OFFSET + TOOLTIP_WIDTH > size.width
-    const flipY = center.y + TOOLTIP_OFFSET + TOOLTIP_HEIGHT > size.height
-    return {
-      left: Math.round(center.x + (flipX ? -TOOLTIP_OFFSET : TOOLTIP_OFFSET)),
-      top: Math.round(center.y + (flipY ? -TOOLTIP_OFFSET : TOOLTIP_OFFSET)),
-      transform: `translate(${flipX ? '-100%' : '0'}, ${flipY ? '-100%' : '0'})`
-    }
-  }, [hover, geometry, size.width, size.height])
+    if (!displayCell) return { display: 'none' }
+    // 浮层避让：靠近右/下边缘时自动翻到另一侧，并夹在容器内（几何规则见 interaction.ts）
+    const placement = computeTooltipPlacement(
+      cellRect(geometry, displayCell.ix, displayCell.iy),
+      { width: size.width, height: size.height },
+      { width: TOOLTIP_WIDTH, height: TOOLTIP_HEIGHT }
+    )
+    return { left: placement.left, top: placement.top }
+  }, [displayCell, geometry, size.width, size.height])
 
   return (
     <div
       className="shmoo-chart"
       ref={containerRef}
+      tabIndex={0}
+      role="application"
+      aria-label={`2D Shmoo 图表交互区：方向键移动，Enter 锁定，Esc 解除`}
+      onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
       onPointerLeave={handlePointerLeave}
-      onDoubleClick={handleDoubleClick}
+      onKeyDown={handleKeyDown}
       data-chart-root="1"
     >
       <canvas ref={canvasRefs.static} className="shmoo-chart__canvas" aria-hidden="true" />
@@ -465,11 +689,12 @@ export function Shmoo2DChart({
         role="img"
       />
 
-      {hover ? (
+      {displayCell ? (
         <div
-          className={`chart-tip${hoverVisible ? ' is-visible' : ''}`}
+          className={`chart-tip${tipVisible ? ' is-visible' : ''}${safeSelection ? ' is-locked' : ''}`}
           style={tooltipStyle}
-          aria-hidden={!hoverVisible}
+          aria-hidden={!tipVisible}
+          data-chart-tip="1"
         >
           <div className="chart-tip__head">
             <span className="chart-tip__site">{site.siteLabel}</span>
@@ -479,23 +704,27 @@ export function Shmoo2DChart({
             <div>
               <dt>{xAxis.label}</dt>
               <dd className="mono">
-                {xAxis.values[hover.ix].toFixed(xDecimals)}
+                {xAxis.values[displayCell.ix].toFixed(xDecimals)}
                 {xAxis.unit ? <i> {xAxis.unit}</i> : null}
               </dd>
             </div>
             <div>
               <dt>{yAxis.label}</dt>
               <dd className="mono">
-                {yAxis.values[hover.iy].toFixed(yDecimals)}
+                {yAxis.values[displayCell.iy].toFixed(yDecimals)}
                 {yAxis.unit ? <i> {yAxis.unit}</i> : null}
               </dd>
             </div>
             <div>
               <dt>{dataset.valueLabel}</dt>
               <dd className="mono">
-                {formatMeasure(hoverValue, site.valueRange)}
+                {formatMeasure(displayValue, site.valueRange)}
                 {dataset.valueUnit ? <i> {dataset.valueUnit}</i> : null}
               </dd>
+            </div>
+            <div>
+              <dt>margin</dt>
+              <dd className="mono">{marginText}</dd>
             </div>
           </dl>
         </div>

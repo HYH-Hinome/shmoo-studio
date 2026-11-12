@@ -80,6 +80,13 @@ export const CHART_STRUCTURE = {
   /** 十字准线在图框之外的部分：贯穿全图，但不抢图框内的注意力 */
   crosshairSoft: 'rgba(56, 207, 224, 0.18)',
   hoverBorder: '#6fe3ef',
+  /** 锁定格描边：比 hover 更亮更实，保证鼠标移到别处后仍能一眼找到锁定格 */
+  selectionBorder: '#eaf6ff',
+  /** 锁定格描边外圈：深色一道，避免白线落在浅色格子上看不清 */
+  selectionHalo: 'rgba(4, 8, 12, 0.72)',
+  /** 框选区域：极淡青色填充 + 亮青色虚线边 */
+  boxFill: 'rgba(56, 207, 224, 0.10)',
+  boxBorder: 'rgba(111, 227, 239, 0.9)',
   boundary: 'rgba(230, 238, 247, 0.52)',
   /** 背景 vignette：≤1.2%，且只画在色块之前 */
   vignette: 'rgba(0, 0, 0, 0.012)'

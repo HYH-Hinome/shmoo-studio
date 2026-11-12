@@ -516,6 +516,16 @@ select {
   cursor: crosshair;
 }
 
+/* 键盘焦点必须可见：鼠标点击不显示描边，Tab / 方向键操作时显示青色焦点环 */
+.shmoo-chart:focus {
+  outline: none;
+}
+
+.shmoo-chart:focus-visible {
+  outline: 2px solid rgba(111, 227, 239, 0.78);
+  outline-offset: 2px;
+}
+
 /* hover 读数浮层：位置由 JS 计算（吸附到格子中心），这里只管外观与淡入淡出 */
 .chart-tip {
   position: absolute;
@@ -533,6 +543,12 @@ select {
 
 .chart-tip.is-visible {
   opacity: 1;
+}
+
+/* 锁定态：边框换成亮一档的青色，呼应格子上的锁定描边 */
+.chart-tip.is-locked {
+  border-color: rgba(111, 227, 239, 0.55);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(111, 227, 239, 0.12);
 }
 
 .chart-tip__head {
@@ -1086,6 +1102,43 @@ select {
   width: 1px;
   height: 9px;
   background: var(--color-line);
+}
+
+/* 阶段 ⑤：框选统计。与常规统计之间加一道分隔线，避免数字混在一起读错 */
+.statusbar__selection {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-left: var(--space-3);
+  margin-left: var(--space-1);
+  border-left: 1px solid rgba(111, 227, 239, 0.32);
+  color: var(--color-text-muted);
+  overflow: hidden;
+}
+
+/* 清除按钮：小尺寸、低干扰，但仍然满足 24px 的可点击高度 */
+.statusbar__clear {
+  padding: 2px 7px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--text-2xs);
+  line-height: 1.4;
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.statusbar__clear:hover {
+  border-color: rgba(111, 227, 239, 0.5);
+  color: var(--color-text-primary);
+}
+
+.statusbar__clear:focus-visible {
+  outline: 2px solid rgba(111, 227, 239, 0.78);
+  outline-offset: 1px;
 }
 
 .statusbar__meta {

@@ -19,6 +19,7 @@ import {
   pickTickIndices,
   tickDecimals
 } from './geometry'
+import type { CellBox } from './interaction'
 
 /**
  * 2D Shmoo 的三层绘制实现（命令式 Canvas 2D，不含 React 状态）。
@@ -102,12 +103,17 @@ export interface InteractionLayerInput {
   /**
    * 悬停所在的行号：整行铺一层很淡的白色，暗示“双击这一行可以切片”。
    * 只提示、不抢注意力，因此透明度固定 8%，不做动画。
+   * 锁定或框选期间不传（避免多个高亮互相干扰）。
    */
   hoverRow?: number | null
   /** 悬停格对应的值，用于在十字线端点显示读数（可选） */
   hoverValue?: string | null
   /** hover 涟漪；null/缺省表示不画（reduced-motion 或未移动） */
   ripple?: RippleInput | null
+  /** 锁定格：常显描边（深色外圈 + 亮白内圈），鼠标移开后仍然可见 */
+  locked?: CellIndex | null
+  /** 框选区域（已归一化的格子索引，含端点）；null 表示没有框选 */
+  box?: CellBox | null
 }
 
 /** 氛围动效参数：只有用户打开开关才传入 */
@@ -861,7 +867,68 @@ export function drawBoundaryLayer(
 /** 涟漪持续时间（ms）：快速衰减，不留残影 */
 const RIPPLE_DURATION = 300
 
-/** 交互层：十字准线（贯穿全图） + hover 格描边 + 涟漪；每帧全清 */
+/**
+ * 沿圆角单元格的轮廓描一圈边。
+ *
+ * 描边外扩 `inset` 像素，让线压在格缝上而不是吃进色块；
+ * 圆角半径同步 + inset，保证描边形状与填充完全同心（不会出现“圆角对不上”的毛边）。
+ */
+function strokeCellOutline(
+  ctx: CanvasRenderingContext2D,
+  rect: { x: number; y: number; w: number; h: number },
+  color: string,
+  lineWidth: number,
+  inset: number
+): void {
+  const innerW = rect.w - CELL_GAP
+  const innerH = rect.h - CELL_GAP
+  if (innerW <= 0 || innerH <= 0) return
+  ctx.strokeStyle = color
+  ctx.lineWidth = lineWidth
+  ctx.beginPath()
+  ctx.roundRect(
+    rect.x + CELL_GAP / 2 - inset,
+    rect.y + CELL_GAP / 2 - inset,
+    Math.max(0, innerW + inset * 2),
+    Math.max(0, innerH + inset * 2),
+    cellCornerRadius(innerW, innerH) + inset
+  )
+  ctx.stroke()
+}
+
+/** 框选区域：极淡青色填充 + 亮青色虚线边（只按矩形四边画，不逐格填充） */
+function drawBoxSelection(
+  ctx: CanvasRenderingContext2D,
+  geometry: ChartGeometry,
+  box: CellBox,
+  dpr: number
+): void {
+  const left = geometry.x.edges[box.ix0]
+  const right = geometry.x.edges[box.ix1 + 1]
+  // 行 0 在底部：iy0 是下边界，iy1 是上边界
+  const bottom = geometry.y.edges[box.iy0]
+  const top = geometry.y.edges[box.iy1 + 1]
+  const w = right - left
+  const h = bottom - top
+  if (!(w > 0) || !(h > 0)) return
+
+  const x = snap(left, dpr)
+  const y = snap(top, dpr)
+  const sw = Math.max(1, snap(left + w, dpr) - x)
+  const sh = Math.max(1, snap(bottom, dpr) - y)
+
+  ctx.fillStyle = CHART_STRUCTURE.boxFill
+  ctx.fillRect(x, y, sw, sh)
+
+  ctx.save()
+  ctx.strokeStyle = CHART_STRUCTURE.boxBorder
+  ctx.lineWidth = 1
+  ctx.setLineDash([4, 3])
+  ctx.strokeRect(x + 0.5 / dpr, y + 0.5 / dpr, sw - 1 / dpr, sh - 1 / dpr)
+  ctx.restore()
+}
+
+/** 交互层：十字准线（贯穿全图） + hover/锁定描边 + 框选 + 涟漪；每帧全清 */
 export function drawInteractionLayer(
   ctx: CanvasRenderingContext2D,
   size: CanvasSize,
@@ -873,84 +940,104 @@ export function drawInteractionLayer(
 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, width, height)
-  if (!hover || plot.w <= 2) return
+  if ((!hover && !input.locked && !input.box) || plot.w <= 2) return
 
-  // 整行提示：8% 白色叠加，覆盖绘图区整行（含格子之间的缝隙），
-  // 目的是让“这一行可以被双击切开”这件事在不喧宾夺主的前提下可被察觉。
+  const locked = input.locked ?? null
+  const box = input.box ?? null
+
+  // 整行提示：8% 白色叠加，覆盖绘图区整行（含格子之间的缝隙）。
+  // 锁定或框选时不再画整行，避免三种高亮叠在一起看不清当前读数。
   const hoverRow = input.hoverRow
-  if (typeof hoverRow === 'number' && hoverRow >= 0 && hoverRow < geometry.y.edges.length - 1) {
+  if (
+    !locked &&
+    !box &&
+    typeof hoverRow === 'number' &&
+    hoverRow >= 0 &&
+    hoverRow < geometry.y.edges.length - 1
+  ) {
     const top = geometry.y.edges[hoverRow + 1]
     const bottom = geometry.y.edges[hoverRow]
     ctx.fillStyle = 'rgba(255, 255, 255, 0.08)'
     ctx.fillRect(plot.x, snap(top, dpr), plot.w, snap(bottom, dpr) - snap(top, dpr))
   }
 
-  const center = cellCenter(geometry, hover.ix, hover.iy)
-  const cx = snap(center.x, dpr)
-  const cy = snap(center.y, dpr)
+  // 十字准线与读数都吸附到“当前显示格”：锁定后就是锁定格，
+  // 因此鼠标移动不会再带着准线跑，方便腾出手记录数值。
+  if (hover) {
+    const center = cellCenter(geometry, hover.ix, hover.iy)
+    const cx = snap(center.x, dpr)
+    const cy = snap(center.y, dpr)
 
-  // 涟漪：从命中点扩散的细环 + 极淡径向填充，300ms 内衰减到 0
-  const ripple = input.ripple
-  if (ripple && ripple.elapsed >= 0 && ripple.elapsed < RIPPLE_DURATION) {
-    const t = ripple.elapsed / RIPPLE_DURATION
-    const radius = 6 + t * Math.min(140, Math.max(plot.w, plot.h) * 0.22)
-    const fade = (1 - t) * (1 - t)
+    // 涟漪：从命中点扩散的细环 + 极淡径向填充，300ms 内衰减到 0
+    const ripple = input.ripple
+    if (ripple && ripple.elapsed >= 0 && ripple.elapsed < RIPPLE_DURATION) {
+      const t = ripple.elapsed / RIPPLE_DURATION
+      const radius = 6 + t * Math.min(140, Math.max(plot.w, plot.h) * 0.22)
+      const fade = (1 - t) * (1 - t)
 
-    const gradient = ctx.createRadialGradient(ripple.x, ripple.y, 0, ripple.x, ripple.y, radius)
-    gradient.addColorStop(0, `rgba(111, 227, 239, ${(0.16 * fade).toFixed(4)})`)
-    gradient.addColorStop(0.7, `rgba(111, 227, 239, ${(0.05 * fade).toFixed(4)})`)
-    gradient.addColorStop(1, 'rgba(111, 227, 239, 0)')
-    ctx.fillStyle = gradient
-    ctx.beginPath()
-    ctx.arc(ripple.x, ripple.y, radius, 0, Math.PI * 2)
-    ctx.fill()
+      const gradient = ctx.createRadialGradient(
+        ripple.x,
+        ripple.y,
+        0,
+        ripple.x,
+        ripple.y,
+        radius
+      )
+      gradient.addColorStop(0, `rgba(111, 227, 239, ${(0.16 * fade).toFixed(4)})`)
+      gradient.addColorStop(0.7, `rgba(111, 227, 239, ${(0.05 * fade).toFixed(4)})`)
+      gradient.addColorStop(1, 'rgba(111, 227, 239, 0)')
+      ctx.fillStyle = gradient
+      ctx.beginPath()
+      ctx.arc(ripple.x, ripple.y, radius, 0, Math.PI * 2)
+      ctx.fill()
 
-    ctx.strokeStyle = `rgba(111, 227, 239, ${(0.45 * fade).toFixed(4)})`
+      ctx.strokeStyle = `rgba(111, 227, 239, ${(0.45 * fade).toFixed(4)})`
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.arc(ripple.x, ripple.y, radius, 0, Math.PI * 2)
+      ctx.stroke()
+    }
+
+    // 十字准线：贯穿全图（图框外更淡），吸附到格子中心，虚线
     ctx.lineWidth = 1
+    ctx.setLineDash([3, 3])
+    ctx.strokeStyle = CHART_STRUCTURE.crosshairSoft
     ctx.beginPath()
-    ctx.arc(ripple.x, ripple.y, radius, 0, Math.PI * 2)
+    ctx.moveTo(cx + 0.5 / dpr, 0)
+    ctx.lineTo(cx + 0.5 / dpr, plot.y)
+    ctx.moveTo(cx + 0.5 / dpr, plot.y + plot.h)
+    ctx.lineTo(cx + 0.5 / dpr, height)
+    ctx.moveTo(0, cy + 0.5 / dpr)
+    ctx.lineTo(plot.x, cy + 0.5 / dpr)
+    ctx.moveTo(plot.x + plot.w, cy + 0.5 / dpr)
+    ctx.lineTo(width, cy + 0.5 / dpr)
     ctx.stroke()
+
+    ctx.strokeStyle = CHART_STRUCTURE.crosshair
+    ctx.beginPath()
+    ctx.moveTo(cx + 0.5 / dpr, plot.y)
+    ctx.lineTo(cx + 0.5 / dpr, plot.y + plot.h)
+    ctx.moveTo(plot.x, cy + 0.5 / dpr)
+    ctx.lineTo(plot.x + plot.w, cy + 0.5 / dpr)
+    ctx.stroke()
+    ctx.setLineDash([])
   }
 
-  // 十字准线：贯穿全图（图框外更淡），吸附到格子中心，虚线
-  ctx.lineWidth = 1
-  ctx.setLineDash([3, 3])
-  ctx.strokeStyle = CHART_STRUCTURE.crosshairSoft
-  ctx.beginPath()
-  ctx.moveTo(cx + 0.5 / dpr, 0)
-  ctx.lineTo(cx + 0.5 / dpr, plot.y)
-  ctx.moveTo(cx + 0.5 / dpr, plot.y + plot.h)
-  ctx.lineTo(cx + 0.5 / dpr, height)
-  ctx.moveTo(0, cy + 0.5 / dpr)
-  ctx.lineTo(plot.x, cy + 0.5 / dpr)
-  ctx.moveTo(plot.x + plot.w, cy + 0.5 / dpr)
-  ctx.lineTo(width, cy + 0.5 / dpr)
-  ctx.stroke()
+  // 当前格描边：亮青色，1.5px；跟随圆角单元格的形状（半径与填充一致）。
+  // 锁定后不再画 hover 描边，改由更醒目的锁定描边表示。
+  if (hover && !locked) {
+    strokeCellOutline(ctx, cellRect(geometry, hover.ix, hover.iy), CHART_STRUCTURE.hoverBorder, 1.5, 0.75)
+  }
 
-  ctx.strokeStyle = CHART_STRUCTURE.crosshair
-  ctx.beginPath()
-  ctx.moveTo(cx + 0.5 / dpr, plot.y)
-  ctx.lineTo(cx + 0.5 / dpr, plot.y + plot.h)
-  ctx.moveTo(plot.x, cy + 0.5 / dpr)
-  ctx.lineTo(plot.x + plot.w, cy + 0.5 / dpr)
-  ctx.stroke()
-  ctx.setLineDash([])
+  // 锁定格：先用深色画粗一点的“垫底”，再叠亮白细线。
+  // 深色外圈的作用是让白线在浅色 PASS 格与亮色热力格上都保持可见。
+  if (locked) {
+    const rect = cellRect(geometry, locked.ix, locked.iy)
+    strokeCellOutline(ctx, rect, CHART_STRUCTURE.selectionHalo, 3.5, 1.6)
+    strokeCellOutline(ctx, rect, CHART_STRUCTURE.selectionBorder, 1.5, 0.2)
+  }
 
-  // 当前格描边：亮青色，1.5px；跟随圆角单元格的形状（半径与填充一致），
-  // 外扩约 0.75px，保证描边压在格缝上而不是吃进色块。
-  const rect = cellRect(geometry, hover.ix, hover.iy)
-  const inset = 0.75
-  const hw = Math.max(0, rect.w - CELL_GAP + inset * 2)
-  const hh = Math.max(0, rect.h - CELL_GAP + inset * 2)
-  ctx.strokeStyle = CHART_STRUCTURE.hoverBorder
-  ctx.lineWidth = 1.5
-  ctx.beginPath()
-  ctx.roundRect(
-    rect.x + CELL_GAP / 2 - inset,
-    rect.y + CELL_GAP / 2 - inset,
-    hw,
-    hh,
-    cellCornerRadius(rect.w - CELL_GAP, rect.h - CELL_GAP) + inset
-  )
-  ctx.stroke()
+  // 框选：半透明填充 + 虚线边。放在最后画，保证任何描边都不会被填充压住。
+  if (box) drawBoxSelection(ctx, geometry, box, dpr)
 }
+

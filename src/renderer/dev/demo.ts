@@ -20,9 +20,12 @@ import { useAppStore } from '../state/store'
  *   ?demo=1&sample=pattern   载入 0/1 pattern 样例（spec: min=1 max=1，热力按钮会置灰）
  *   ?demo=1&hover=21,9       载入后在该格子上触发一次 pointermove（截图用，越界会被忽略）
  *                           1D 数据集写成 ?hover=7（按采样下标吸附）
+ *   ?demo=1&lock=21,9        截“锁定读数”用：直接把该格设为锁定态（真实单击由单测/浏览器实测覆盖）
+ *   ?demo=1&box=8,6,16,14    截“框选统计”用：直接写入矩形框选（真实拖拽同上）
  *   ?demo=1&slice=row:12     载入 2D 样例后直接切出第 12 行（列切片写 slice=col:8）
  *   ?demo=1&bench=1          额外跑 1920×1080 @ DPR2 的静态层压测，结果写入 window.__shmooBench
  *   ?demo=1&bench=1&grid=100 用合成 100×100 网格压测（默认用样例的 30×30）
+ *   ?demo=1&interaction-perf=1  合成 60 次跨格 pointermove，实测交互层重绘耗时并显示在页面上
  *
  * 生产构建时 main.tsx 中的 `import.meta.env.DEV` 分支会被静态剔除，
  * 本文件连同样例 CSV 都不会进入产物。
@@ -66,18 +69,26 @@ async function waitFor<T>(getter: () => T | null, timeout = 4000): Promise<T | n
   })
 }
 
-/** 解析并写入 store（只做阶段 ② 已有的解析链路，不伪造数据） */
+/**
+ * 解析并写入 store（只做阶段 ② 已有的解析链路，不伪造数据）。
+ *
+ * 演示入口刻意使用同步解析（parseShmooCsv），而不是正式导入用的 Worker：
+ *  - 样例只有几十 KB，同步解析约几毫秒，不影响截图等待；
+ *  - 无头浏览器截图 / 自动化脚本里，Worker 的完成时机不稳定（虚拟时间下尤其明显），
+ *    会出现“截图时数据还没进来”的假失败；
+ *  - 正式导入路径（App 的打开文件）仍然走 parseCsvInWorker，这里只是演示加载器。
+ */
 async function loadDemoDataset(sample: DemoSample): Promise<ShmooDataset | null> {
   const source = DEMO_SAMPLES[sample]
-  const [{ default: text }, { parseCsvInWorker }] = await Promise.all([
+  const [{ default: text }, { parseShmooCsv }] = await Promise.all([
     source.loader(),
-    import('../lib/parseCsv')
+    import('@shared/csv/parser')
   ])
 
-  const { dataset, report } = await parseCsvInWorker({
-    text,
+  const { dataset, report } = parseShmooCsv(text, {
     fileName: source.file,
-    filePath: null
+    filePath: null,
+    fileSize: text.length
   })
   if (!dataset) {
     console.warn('[demo] 样例解析失败', report)
@@ -158,6 +169,89 @@ async function applyHover(dataset: ShmooDataset, spec: string): Promise<void> {
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
     if (document.querySelector('.chart-tip.is-visible')) return
   }
+}
+
+/**
+ * 把格子索引换算成浏览器坐标（含容器偏移），并等待画布完成首帧测量。
+ * hover / lock / box 三个演示入口共用，避免几何计算各写一份。
+ */
+async function locateCell(
+  dataset: ShmooDataset,
+  ix: number,
+  iy: number
+): Promise<{ container: HTMLElement; clientX: number; clientY: number } | null> {
+  const nx = dataset.xAxis.values.length
+  const ny = dataset.yAxis?.values.length ?? 1
+  if (ix < 0 || ix >= nx || iy < 0 || iy >= ny) {
+    console.warn(`[demo] 索引越界：(${ix}, ${iy})，当前网格 ${nx}×${ny}`)
+    return null
+  }
+
+  const container = await waitFor(() => document.querySelector<HTMLElement>('.shmoo-chart'))
+  if (!container) return null
+  await waitFor(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>('[data-chart-canvas]')
+    return canvas && canvas.width > 100 ? canvas : null
+  })
+
+  const geometry = computeGeometry(
+    container.clientWidth,
+    container.clientHeight,
+    DEFAULT_PADDING,
+    dataset.xAxis.values,
+    dataset.yAxis?.values ?? [0]
+  )
+  const center = cellCenter(geometry, ix, iy)
+  const rect = container.getBoundingClientRect()
+  return {
+    container,
+    clientX: rect.left + container.clientLeft + center.x,
+    clientY: rect.top + container.clientTop + center.y
+  }
+}
+
+/**
+ * 截“锁定读数”用：直接写入锁定状态。
+ *
+ * 为什么不是模拟点击：无头浏览器 + 虚拟时间的截图流程里，250ms 的单击判定定时器
+ * 不保证在截图前执行，会得到“没有锁定描边”的假失败。真实点击路径（含单/双击区分）
+ * 由 tests/chart-interaction.test.ts 的 classifyClick 与浏览器实测覆盖，
+ * 这里只负责把画面稳定地摆到“锁定后”的状态。
+ */
+async function applyLock(dataset: ShmooDataset, spec: string): Promise<void> {
+  const parts = spec.split(',').map((part) => Number(part))
+  const ix = parts[0]
+  const iy = dataset.kind === '1d' ? 0 : parts[1]
+  if (!Number.isInteger(ix) || !Number.isInteger(iy)) {
+    console.warn('[demo] lock 参数应为 "xIndex,yIndex"', spec)
+    return
+  }
+  const point = await locateCell(dataset, ix, iy)
+  if (!point) return
+  useAppStore.getState().setSelection({ ix, iy })
+  // 等一帧，确保交互层按新锁定格重绘后再截图
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+}
+
+/**
+ * 截“框选统计”用：直接写入框选范围（起点 → 终点）。
+ * 与 applyLock 同理：状态直写保证截图稳定，真实拖拽路径由浏览器交互实测覆盖。
+ */
+async function applyBox(dataset: ShmooDataset, spec: string): Promise<void> {
+  const parts = spec.split(',').map((part) => Number(part))
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) {
+    console.warn('[demo] box 参数应为 "x0,y0,x1,y1"', spec)
+    return
+  }
+  const [x0, y0, x1, y1] = parts
+  const start = await locateCell(dataset, x0, y0)
+  const end = await locateCell(dataset, x1, y1)
+  if (!start || !end) return
+  useAppStore.getState().setBox({
+    anchor: { ix: x0, iy: y0 },
+    focus: { ix: x1, iy: y1 }
+  })
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
 }
 
 /** 统计工具：中位数 / p95 */
@@ -282,6 +376,99 @@ function runBench(dataset: ShmooDataset, grid = 0): void {
   console.info('[demo] 静态层压测', bench)
 }
 
+/**
+ * 交互层耗时探针（仅 dev，`?demo=1&interaction-perf=1`）。
+ *
+ * 目的：验证“鼠标移动只重绘交互层，且不影响帧率”这条验收项。
+ * 实现方式不依赖外部 CDP：
+ *  - 在页面内合成 60 次跨格 pointermove（真正走组件的指针处理与 repaint 调度）；
+ *  - 等每帧 rAF 落地后，从 window.__shmooPerf.interaction 取真实绘制耗时；
+ *  - 统计中位 / p95 / max，并把结果写到页面角标与 document.title，截图或读标题都能拿到。
+ * 同时记录静态层 / 边界层的采样数变化，用于证明移动鼠标不会触发这两层重绘。
+ */
+async function runInteractionProbe(dataset: ShmooDataset): Promise<void> {
+  const container = await waitFor(() => document.querySelector<HTMLElement>('.shmoo-chart'))
+  if (!container || dataset.kind !== '2d' || !dataset.yAxis) return
+
+  // 先清掉锁定/框选：锁定态下组件会刻意跳过 hover 重绘，测不到交互层开销
+  useAppStore.getState().clearInteraction()
+
+  const rect = container.getBoundingClientRect()
+  const geometry = computeGeometry(
+    container.clientWidth,
+    container.clientHeight,
+    DEFAULT_PADDING,
+    dataset.xAxis.values,
+    dataset.yAxis.values
+  )
+  const nx = dataset.xAxis.values.length
+  const ny = dataset.yAxis.values.length
+  const perf = window.__shmooPerf
+  if (!perf) return
+
+  // 等入场动画结束，避免把 stagger 的静态层重绘算到交互层头上
+  await new Promise<void>((resolve) => setTimeout(resolve, 700))
+
+  const staticBefore = perf.static.length
+  const boundaryBefore = perf.boundary.length
+  perf.interaction.length = 0
+
+  for (let i = 0; i < 60; i++) {
+    const ix = i % nx
+    const iy = Math.floor(i / nx) % ny
+    const center = cellCenter(geometry, ix, iy)
+    container.dispatchEvent(
+      new PointerEvent('pointermove', {
+        bubbles: true,
+        pointerType: 'mouse',
+        clientX: rect.left + container.clientLeft + center.x,
+        clientY: rect.top + container.clientTop + center.y
+      })
+    )
+    // 每格一帧：确保测到的是“每次移动一次重绘”的稳定值，而不是同一帧内的合并结果
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  }
+
+  const sorted = [...perf.interaction].sort((a, b) => a - b)
+  const result = {
+    moves: 60,
+    samples: sorted.length,
+    median: quantile(sorted, 0.5),
+    p95: quantile(sorted, 0.95),
+    max: sorted[sorted.length - 1] ?? 0,
+    staticRedraws: perf.static.length - staticBefore,
+    boundaryRedraws: perf.boundary.length - boundaryBefore
+  }
+
+  const text =
+    `交互层重绘 · 60 次移动\n` +
+    `median ${result.median.toFixed(3)} ms · p95 ${result.p95.toFixed(3)} ms · max ${result.max.toFixed(3)} ms\n` +
+    `static +${result.staticRedraws} · boundary +${result.boundaryRedraws} · samples ${result.samples}`
+
+  // 固定角标：无头截图直接可读；document.title 供 dump-dom / 外部脚本读取
+  const badge = document.createElement('div')
+  badge.id = 'perf-badge'
+  badge.textContent = text
+  badge.style.cssText = [
+    'position:fixed',
+    'left:12px',
+    'top:12px',
+    'z-index:9999',
+    'padding:10px 12px',
+    'background:rgba(6,10,14,0.92)',
+    'border:1px solid rgba(111,227,239,0.7)',
+    'border-radius:6px',
+    'color:#eaf6ff',
+    'font:12px/1.5 "JetBrains Mono",monospace',
+    'font-variant-numeric:tabular-nums',
+    'white-space:pre',
+    'pointer-events:none'
+  ].join(';')
+  document.body.appendChild(badge)
+  document.title = `PERF median=${result.median.toFixed(3)} p95=${result.p95.toFixed(3)} max=${result.max.toFixed(3)} static=${result.staticRedraws} boundary=${result.boundaryRedraws}`
+  console.info('[demo] 交互层耗时', result)
+}
+
 /** 入口：main.tsx 在 DEV 下动态调用 */
 export async function maybeLoadDemo(): Promise<void> {
   if (!import.meta.env.DEV) return
@@ -368,6 +555,13 @@ export async function maybeLoadDemo(): Promise<void> {
   const hover = params.get('hover')
   if (hover) await applyHover(dataset, hover)
 
+  // 锁定 / 框选演示：也放在切片之前，切片会清空锁定与框选（跨视图重置规则）
+  const lock = params.get('lock')
+  if (lock) await applyLock(dataset, lock)
+
+  const boxParam = params.get('box')
+  if (boxParam) await applyBox(dataset, boxParam)
+
   // 切片：?slice=row:12 / ?slice=col:8（截图与自检用，不写 index 时默认第 0 行）
   const sliceParam = params.get('slice')
   if (sliceParam && dataset.kind === '2d') {
@@ -387,5 +581,10 @@ export async function maybeLoadDemo(): Promise<void> {
   if (params.get('bench') === '1' && dataset.kind === '2d') {
     const grid = Number.parseInt(params.get('grid') ?? '0', 10)
     runBench(dataset, Number.isFinite(grid) && grid > 0 ? grid : 0)
+  }
+
+  // 交互层耗时探针：放在最后，保证前面的演示状态（lock/box/slice）不会干扰测量
+  if (params.get('interaction-perf') === '1') {
+    await runInteractionProbe(dataset)
   }
 }

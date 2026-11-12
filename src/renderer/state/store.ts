@@ -2,6 +2,8 @@ import { create } from 'zustand'
 import type { ImportReport, ShmooDataset, SpecLimit } from '@shared/types/shmoo'
 import { parseCsvInWorker } from '../lib/parseCsv'
 import type { SliceAxis, SliceRef } from '../chart/slice'
+import type { BoxSelection } from '../chart/interaction'
+import type { CellIndex } from '../chart/geometry'
 
 /** 默认 spec：未导入数据时使用；导入后会由 CSV 元数据覆盖（D1：全局共用一份） */
 export const DEFAULT_SPEC: SpecLimit = { mode: 'min', min: undefined, max: undefined }
@@ -11,6 +13,21 @@ export type ColorMode = 'binary' | 'heat'
 
 /** 1D 图表形态：二值色带或连续曲线（阶段 ④） */
 export type OneDForm = 'band' | 'curve'
+
+/** 当前数据集的网格尺寸（1D 视为 ny = 1，避免两套口径） */
+function gridSize(dataset: ShmooDataset | null): { nx: number; ny: number } {
+  if (!dataset) return { nx: 0, ny: 0 }
+  return {
+    nx: dataset.xAxis.values.length,
+    ny: dataset.yAxis ? dataset.yAxis.values.length : 1
+  }
+}
+
+/** 格子索引是否落在当前数据集的网格内（用于挡住越界锁定） */
+function isValidCell(dataset: ShmooDataset | null, cell: CellIndex): boolean {
+  const { nx, ny } = gridSize(dataset)
+  return cell.ix >= 0 && cell.ix < nx && cell.iy >= 0 && cell.iy < ny
+}
 
 interface AppState {
   /** 当前数据集；未导入或导入失败时为 null */
@@ -39,6 +56,13 @@ interface AppState {
   statusText: string
   /** 最近一次错误（读取失败、致命解析错误等），展示在状态栏 */
   error: string | null
+  /**
+   * 锁定读数（阶段 ⑤）：单击锁定某个格子后，浮层常显、不随鼠标移动消失。
+   * 只保存索引；像素位置每次由几何实时算出，窗口尺寸变化不会让锁定失效。
+   */
+  selection: CellIndex | null
+  /** 框选范围（阶段 ⑤）：拖拽或 Shift+方向键产生的矩形区域；null 表示没有框选 */
+  box: BoxSelection | null
   appVersion: string
   platform: string
 
@@ -60,6 +84,19 @@ interface AppState {
   closeSlice: () => void
   /** 手动清除 2D 上的切片标记 */
   clearSliceMarker: () => void
+  /**
+   * 锁定 / 切换锁定格。
+   * - 传入与当前锁定相同的格子 → 解除锁定；
+   * - 传入不同格子 → 切换锁定目标；
+   * - 越界索引直接忽略（防止切换站点后残留指向不存在的格子）。
+   */
+  toggleSelection: (cell: CellIndex) => void
+  /** 直接设置锁定格（null 解除）；越界索引按解除处理，绝不保存非法坐标 */
+  setSelection: (cell: CellIndex | null) => void
+  /** 直接设置框选范围（null 清除）；端点越界会被夹到网格内 */
+  setBox: (box: BoxSelection | null) => void
+  /** 清掉锁定与框选（Esc 使用） */
+  clearInteraction: () => void
   setDataset: (dataset: ShmooDataset | null) => void
 }
 
@@ -77,6 +114,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   isParsing: false,
   statusText: '就绪 · 尚未导入数据',
   error: null,
+  selection: null,
+  box: null,
   appVersion: '—',
   platform: '—',
 
@@ -124,7 +163,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         error: null,
         // 新数据集与旧切片无关：一并清空，避免下标指向别的数据
         slice: null,
-        sliceMarker: null
+        sliceMarker: null,
+        // 锁定/框选同样属于旧数据集，必须清掉
+        selection: null,
+        box: null
       })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -142,7 +184,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  setActiveSite: (siteId) => set({ activeSiteId: siteId }),
+  // 切换站点意味着整张图的数值都换了：锁定格与框选区域不再可信，必须重置，
+  // 否则浮层会停在一个“新站点里同名但不同数据”的格子上（看起来像缓存了旧读数）。
+  setActiveSite: (siteId) => set({ activeSiteId: siteId, selection: null, box: null }),
   setSpec: (spec) => set({ spec }),
   setColorMode: (mode) => set({ colorMode: mode }),
   setOneDForm: (form) => set({ oneDForm: form }),
@@ -155,7 +199,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     const limit = ref.axis === 'row' ? dataset.yAxis.values.length : dataset.xAxis.values.length
     if (limit <= 0) return
     const index = Math.max(0, Math.min(ref.index, limit - 1))
-    set({ slice: { axis: ref.axis, index }, sliceMarker: { axis: ref.axis, index } })
+    // 进入切片后 2D 不再显示：锁定与框选一并清掉（返回时从干净状态开始）
+    set({
+      slice: { axis: ref.axis, index },
+      sliceMarker: { axis: ref.axis, index },
+      selection: null,
+      box: null
+    })
   },
 
   setSliceAxis: (axis) => {
@@ -172,6 +222,51 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   clearSliceMarker: () => set({ sliceMarker: null }),
 
+  toggleSelection: (cell) => {
+    const { dataset, selection } = get()
+    // 越界索引直接忽略：切换站点/数据集后即使有残留调用也不会锁到不存在的格子
+    if (!isValidCell(dataset, cell)) {
+      set({ selection: null })
+      return
+    }
+    // 同一格再次单击 = 解除锁定；不同格 = 切换锁定目标
+    const same = selection && selection.ix === cell.ix && selection.iy === cell.iy
+    set({ selection: same ? null : { ix: cell.ix, iy: cell.iy } })
+  },
+
+  setSelection: (cell) => {
+    const { dataset } = get()
+    if (!cell || !isValidCell(dataset, cell)) {
+      set({ selection: null })
+      return
+    }
+    set({ selection: { ix: cell.ix, iy: cell.iy } })
+  },
+
+  setBox: (box) => {
+    const { dataset } = get()
+    if (!box) {
+      set({ box: null })
+      return
+    }
+    const { nx, ny } = gridSize(dataset)
+    if (nx <= 0 || ny <= 0) {
+      set({ box: null })
+      return
+    }
+    const anchor = {
+      ix: Math.max(0, Math.min(nx - 1, box.anchor.ix)),
+      iy: Math.max(0, Math.min(ny - 1, box.anchor.iy))
+    }
+    const focus = {
+      ix: Math.max(0, Math.min(nx - 1, box.focus.ix)),
+      iy: Math.max(0, Math.min(ny - 1, box.focus.iy))
+    }
+    set({ box: { anchor, focus } })
+  },
+
+  clearInteraction: () => set({ selection: null, box: null }),
+
   setDataset: (dataset) =>
     set({
       dataset,
@@ -179,6 +274,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       spec: dataset?.spec ?? DEFAULT_SPEC,
       // 换数据集后旧的切片下标可能越界，直接清空，避免指到别的数据上
       slice: null,
-      sliceMarker: null
+      sliceMarker: null,
+      // 锁定与框选同样属于旧数据集的坐标，必须清空
+      selection: null,
+      box: null
     })
 }))
