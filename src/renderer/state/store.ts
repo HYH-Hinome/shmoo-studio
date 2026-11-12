@@ -59,6 +59,11 @@ interface AppState {
   isParsing: boolean
   /** 状态栏文案 */
   statusText: string
+  /**
+   * 导出对话框当前选中的格式（阶段 ⑦）。
+   * null 表示关闭；菜单命令与工具栏按钮都只改这个字段，对话框本身由 App 渲染。
+   */
+  exportFormat: 'png' | 'pdf' | null
   /** 最近一次错误（读取失败、致命解析错误等），展示在状态栏 */
   error: string | null
   /**
@@ -112,6 +117,8 @@ interface AppState {
   /** 清掉锁定与框选（Esc 使用） */
   clearInteraction: () => void
   setDataset: (dataset: ShmooDataset | null) => void
+  /** 打开导出对话框（'png' / 'pdf'）；传 null 关闭 */
+  openExportDialog: (format: 'png' | 'pdf' | null) => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -129,6 +136,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   report: null,
   isParsing: false,
   statusText: '就绪 · 尚未导入数据',
+  exportFormat: null,
   error: null,
   selection: null,
   box: null,
@@ -346,5 +354,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 锁定与框选同样属于旧数据集的坐标，必须清空
       selection: null,
       box: null
-    })
+    }),
+
+  // 导出对话框只保存“打开的是哪种格式”，具体的选项（倍数 / 全部 site / 汇总页）
+  // 都是对话框内的临时状态，关闭即丢弃，不需要进全局 store。
+  openExportDialog: (format) => set({ exportFormat: format })
 }))

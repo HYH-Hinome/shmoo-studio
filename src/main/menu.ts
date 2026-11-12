@@ -23,14 +23,12 @@ export function buildAppMenu(getWindow: () => BrowserWindow | null): void {
         {
           label: '导出 PNG…',
           accelerator: 'CmdOrCtrl+Shift+P',
-          // 阶段 ⑦ 才实现导出，这里先置灰，避免用户点了没反应
-          enabled: false,
+          // 阶段 ⑦：菜单只派发命令，未导入数据时由渲染进程给出提示
           click: send('export-png')
         },
         {
           label: '导出 PDF…',
           accelerator: 'CmdOrCtrl+P',
-          enabled: false,
           click: send('export-pdf')
         },
         { type: 'separator' },

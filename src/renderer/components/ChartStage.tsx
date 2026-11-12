@@ -32,6 +32,8 @@ export function ChartStage(): JSX.Element {
   const openSlice = useAppStore((s) => s.openSlice)
   const setSliceAxis = useAppStore((s) => s.setSliceAxis)
   const closeSlice = useAppStore((s) => s.closeSlice)
+  // 导出入口：只负责打开对话框，具体选项与写盘在 ExportDialog 内完成
+  const openExportDialog = useAppStore((s) => s.openExportDialog)
 
   const activeSite = dataset?.sites.find((site) => site.siteId === activeSiteId) ?? null
   const nx = dataset?.xAxis.values.length ?? 0
@@ -224,6 +226,25 @@ export function ChartStage(): JSX.Element {
           </button>
         ) : null}
         <div className="stage__spacer" />
+        {/* 导出按钮：没有数据集时禁用，避免打开一个无内容的对话框 */}
+        <button
+          type="button"
+          className="btn btn--ghost"
+          disabled={!dataset || !activeSite}
+          title="导出当前图表为 PNG（2× / 3×）"
+          onClick={() => openExportDialog('png')}
+        >
+          导出 PNG
+        </button>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          disabled={!dataset || !activeSite}
+          title="导出矢量 PDF（可选全部 site 与汇总页）"
+          onClick={() => openExportDialog('pdf')}
+        >
+          导出 PDF
+        </button>
         {activeSite ? <span className="stage__badge">{activeSite.siteLabel}</span> : null}
         <span className="stage__badge">
           {sliceView

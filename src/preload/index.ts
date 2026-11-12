@@ -8,6 +8,8 @@ import type { AppCommand, ShmooApi } from '../shared/types/api'
 const api: ShmooApi = {
   openCsv: () => ipcRenderer.invoke('dialog:open-csv'),
   getAppInfo: () => ipcRenderer.invoke('app:info'),
+  savePng: (request) => ipcRenderer.invoke('export:save-png', request),
+  savePdf: (request) => ipcRenderer.invoke('export:save-pdf', request),
   onCommand: (listener: (command: AppCommand) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, command: AppCommand): void => listener(command)
     ipcRenderer.on('app:command', handler)

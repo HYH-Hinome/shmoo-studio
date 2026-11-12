@@ -1,6 +1,7 @@
 import { app, BrowserWindow, session, shell } from 'electron'
 import { join } from 'node:path'
 import { registerFileIpc } from './ipc/file'
+import { registerExportIpc } from './ipc/export'
 import { buildAppMenu } from './menu'
 
 /** 是否开发模式：未打包即为开发模式，用于区分加载地址与安全策略 */
@@ -106,6 +107,7 @@ if (!gotSingleInstanceLock) {
     app.setAppUserModelId('com.shmoostudio.app')
     applyProductionCsp()
     registerFileIpc()
+    registerExportIpc()
     buildAppMenu(() => mainWindow)
     createMainWindow()
 

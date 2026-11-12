@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { ChartStage } from './components/ChartStage'
+import { ExportDialog } from './components/ExportDialog'
 import { SiteRail } from './components/SiteRail'
 import { SpecPanel } from './components/SpecPanel'
 import { StatusBar } from './components/StatusBar'
@@ -18,6 +19,7 @@ import { useAppStore } from './state/store'
 export default function App(): JSX.Element {
   const openCsv = useAppStore((s) => s.openCsv)
   const loadAppInfo = useAppStore((s) => s.loadAppInfo)
+  const openExportDialog = useAppStore((s) => s.openExportDialog)
 
   // 启动时读取版本信息（一次性）
   useEffect(() => {
@@ -31,9 +33,12 @@ export default function App(): JSX.Element {
     if (typeof window.shmoo === 'undefined') return
     const unsubscribe = window.shmoo.onCommand((command) => {
       if (command === 'open-csv') void openCsv()
+      // 导出命令只打开对话框；真正的文件选择与写盘在 ExportDialog 里完成
+      if (command === 'export-png') openExportDialog('png')
+      if (command === 'export-pdf') openExportDialog('pdf')
     })
     return unsubscribe
-  }, [openCsv])
+  }, [openCsv, openExportDialog])
 
   return (
     <div className="app-shell">
@@ -44,6 +49,8 @@ export default function App(): JSX.Element {
         <SpecPanel />
       </div>
       <StatusBar />
+      {/* 导出对话框全局只挂一次，菜单与工具栏通过 store 控制开合 */}
+      <ExportDialog />
     </div>
   )
 }

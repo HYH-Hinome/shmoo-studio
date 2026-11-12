@@ -16,6 +16,7 @@ import {
   pickTickIndices,
   tickDecimals
 } from './geometry'
+import type { ChartPadding } from './geometry'
 import type { CanvasSize } from './render2d'
 import { CELL_GAP, cellCornerRadius, drawCellHatch } from './render2d'
 import {
@@ -73,6 +74,12 @@ export interface OneDStaticInput {
   /** 纯二值数据集（0/1 pattern / 无 value）：色带与曲线点改用饱和平涂系统色 */
   flatBinary: boolean
   motion: OneDMotion
+  /**
+   * 自定义绘图区留白（可选）。
+   * 导出 PNG 时需要在顶部额外留出标题区，因此把 top 加大后传进来；
+   * 不传时保持界面使用的 DEFAULT_PADDING，屏幕绘制行为完全不变。
+   */
+  padding?: ChartPadding
 }
 
 export interface OneDInteractionInput {
@@ -686,7 +693,7 @@ export function drawOneDStatic(
   size: CanvasSize,
   input: OneDStaticInput
 ): void {
-  const { dataset, site, form, tint, flatBinary, motion } = input
+  const { dataset, site, form, tint, flatBinary, motion, padding } = input
   const { width, height, dpr } = size
 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -698,7 +705,7 @@ export function drawOneDStatic(
   if (x.length === 0) return
 
   // y 轴传一个占位值：1D 只借用 x 轴的边界/中心计算，plot 尺寸与 2D 完全一致
-  const geometry = computeGeometry(width, height, DEFAULT_PADDING, x, [0])
+  const geometry = computeGeometry(width, height, padding ?? DEFAULT_PADDING, x, [0])
   const { plot } = geometry
   if (plot.w <= 2 || plot.h <= 2) return
 
