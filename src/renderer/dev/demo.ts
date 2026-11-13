@@ -704,7 +704,8 @@ export async function maybeLoadDemo(): Promise<void> {
     const axis = axisRaw === 'col' ? 'col' : 'row'
     const index = Number(indexRaw)
     if (Number.isInteger(index)) {
-      useAppStore.getState().openSlice({ axis, index })
+      // demo 里只有单个下标：两个方向都用它（真实交互中 x / y 来自双击格的两个下标）
+      useAppStore.getState().openSlice({ axis, index, x: index, y: index })
       // 等切片视图真正挂载：面包屑是切片视图独有的元素
       await waitFor(() => document.querySelector('.crumb'))
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))

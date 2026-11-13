@@ -16,10 +16,31 @@ import { tickDecimals } from './geometry'
 /** 切片方向：row = 固定 y 扫 x（沿行），col = 固定 x 扫 y（沿列） */
 export type SliceAxis = 'row' | 'col'
 
-/** 一次切片引用：方向 + 被固定的那条线的下标 */
-export interface SliceRef {
+/**
+ * 切片目标：方向 + 该方向下被固定的那条线的下标。
+ * 纯计算函数（buildSliceSeries / buildSliceDataset）只需要这两项，
+ * 因此单独抽出来，避免把 UI 层的“双击格坐标”耦合进绘制逻辑。
+ */
+export interface SliceTarget {
   axis: SliceAxis
   index: number
+}
+
+/**
+ * 一次切片引用：目标 + 双击那一格的二维下标。
+ *
+ * 为什么两个下标都要保存：
+ *  - 行方向固定的是 y（把双击格所在那一行沿 x 扫出来），所以行方向的有效下标是 y；
+ *  - 列方向固定的是 x（把双击格所在那一列沿 y 扫出来），所以列方向的有效下标是 x；
+ *  - 用户会来回切换方向，如果只存一个 index，切到列方向时就没有“列号”可用了
+ *    （旧实现就是把行号当列号用，取到的并不是双击格所在的列）。
+ * 因此 x / y 各自独立保存，index 只是“当前方向下真正生效的那个”，由 x / y 推导而来。
+ */
+export interface SliceRef extends SliceTarget {
+  /** 双击格的列下标（x 轴方向）；切到列方向（col）时由它决定 index */
+  x: number
+  /** 双击格的行下标（y 轴方向）；行方向（row）时由它决定 index */
+  y: number
 }
 
 /** 切片后的一条 1D 序列 */
@@ -47,7 +68,7 @@ export function formatAxisValue(value: number, values: number[]): string {
 export function buildSliceSeries(
   dataset: ShmooDataset,
   site: SiteGrid,
-  ref: SliceRef
+  ref: SliceTarget
 ): SliceSeries | null {
   if (dataset.kind !== '2d' || !dataset.yAxis) return null
   const nx = dataset.xAxis.values.length
@@ -109,7 +130,7 @@ export function buildSliceSeries(
 export function buildSliceDataset(
   parent: ShmooDataset,
   site: SiteGrid,
-  ref: SliceRef
+  ref: SliceTarget
 ): { dataset: ShmooDataset; site: SiteGrid; series: SliceSeries } | null {
   const series = buildSliceSeries(parent, site, ref)
   if (!series) return null

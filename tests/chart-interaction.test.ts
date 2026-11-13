@@ -275,7 +275,7 @@ describe('跨视图状态重置', () => {
   it('进入切片清空锁定与框选（返回时从干净状态开始）', () => {
     useAppStore.getState().toggleSelection({ ix: 1, iy: 0 })
     useAppStore.getState().setBox({ anchor: { ix: 0, iy: 0 }, focus: { ix: 1, iy: 0 } })
-    useAppStore.getState().openSlice({ axis: 'row', index: 1 })
+    useAppStore.getState().openSlice({ axis: 'row', index: 1, x: 1, y: 1 })
     expect(useAppStore.getState().selection).toBeNull()
     expect(useAppStore.getState().box).toBeNull()
   })

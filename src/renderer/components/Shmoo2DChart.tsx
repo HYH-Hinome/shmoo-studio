@@ -547,7 +547,9 @@ export function Shmoo2DChart({
       // 这样“单击锁定”与“双击切片”不会互相误触发。
       cancelPendingLock()
       lastClickRef.current = null
-      onSlice?.({ axis: 'row', index: drag.anchor.iy })
+      // 双击进入切片：默认先看行方向，同时把该格的行号(y)与列号(x)都记下来，
+      // 之后在切片工具栏切到列方向时，用的是这里的列号 x，而不是行号
+      onSlice?.({ axis: 'row', index: drag.anchor.iy, x: drag.anchor.ix, y: drag.anchor.iy })
       return
     }
 

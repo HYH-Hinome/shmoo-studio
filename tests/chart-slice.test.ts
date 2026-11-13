@@ -161,27 +161,38 @@ describe('formatAxisValue', () => {
 })
 
 describe('切片状态（面包屑与回看定位）', () => {
-  it('双击开切片 → 切列方向自动夹紧下标 → 返回 2D 后标记仍在', () => {
+  it('双击开切片：行方向用 y、列方向用 x，来回切换两个下标都不丢', () => {
     const { dataset } = makeFixture()
     const store = useAppStore
 
     store.setState({ dataset, activeSiteId: 'S1', spec: SPEC, slice: null, sliceMarker: null })
 
-    store.getState().openSlice({ axis: 'row', index: 1 })
-    expect(store.getState().slice).toEqual({ axis: 'row', index: 1 })
-    expect(store.getState().sliceMarker).toEqual({ axis: 'row', index: 1 })
+    // 双击 (x=2, y=1) 那一格：先按行方向看，固定第 1 行
+    store.getState().openSlice({ axis: 'row', index: 1, x: 2, y: 1 })
+    expect(store.getState().slice).toEqual({ axis: 'row', index: 1, x: 2, y: 1 })
+    expect(store.getState().sliceMarker).toEqual({ axis: 'row', index: 1, x: 2, y: 1 })
 
-    // 切到列方向：nx=3，原行号 1 仍然合法
+    // 切到列方向：取的是双击格的列号 x=2，而不是行号 1
     store.getState().setSliceAxis('col')
-    expect(store.getState().slice).toEqual({ axis: 'col', index: 1 })
+    expect(store.getState().slice).toEqual({ axis: 'col', index: 2, x: 2, y: 1 })
 
-    // 越界行号被夹到末行（ny-1 = 1）
-    store.getState().openSlice({ axis: 'row', index: 99 })
-    expect(store.getState().slice).toEqual({ axis: 'row', index: 1 })
+    // 再切回行方向：y=1 仍在，没有被列号覆盖
+    store.getState().setSliceAxis('row')
+    expect(store.getState().slice).toEqual({ axis: 'row', index: 1, x: 2, y: 1 })
+
+    // 越界下标各自夹到末行 / 末列（ny-1=1、nx-1=2），互不覆盖
+    store.getState().openSlice({ axis: 'row', index: 99, x: 99, y: 99 })
+    expect(store.getState().slice).toEqual({ axis: 'row', index: 1, x: 2, y: 1 })
+
+    // 列方向进入时同样只用 x 夹取，y 不影响列号
+    store.getState().openSlice({ axis: 'col', index: 0, x: 0, y: 99 })
+    expect(store.getState().slice).toEqual({ axis: 'col', index: 0, x: 0, y: 1 })
+    store.getState().setSliceAxis('row')
+    expect(store.getState().slice).toEqual({ axis: 'row', index: 1, x: 0, y: 1 })
 
     store.getState().closeSlice()
     expect(store.getState().slice).toBeNull()
-    expect(store.getState().sliceMarker).toEqual({ axis: 'row', index: 1 })
+    expect(store.getState().sliceMarker).toEqual({ axis: 'row', index: 1, x: 0, y: 1 })
 
     store.getState().clearSliceMarker()
     expect(store.getState().sliceMarker).toBeNull()
@@ -191,7 +202,7 @@ describe('切片状态（面包屑与回看定位）', () => {
     const { dataset } = makeFixture()
     const store = useAppStore
     store.setState({ dataset, activeSiteId: 'S1', spec: SPEC, slice: null, sliceMarker: null })
-    store.getState().openSlice({ axis: 'row', index: 0 })
+    store.getState().openSlice({ axis: 'row', index: 0, x: 0, y: 0 })
     expect(store.getState().slice).not.toBeNull()
     store.getState().setDataset(dataset)
     expect(store.getState().slice).toBeNull()

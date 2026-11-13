@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { ImportReport, ShmooDataset, SpecLimit } from '@shared/types/shmoo'
 import { applySpecToDataset, isSameSpec } from '@shared/spec/apply'
 import { parseCsvInWorker } from '../lib/parseCsv'
+import { pickDroppedCsv } from '../lib/fileDrop'
 import type { SliceAxis, SliceRef } from '../chart/slice'
 import type { BoxSelection } from '../chart/interaction'
 import type { CellIndex } from '../chart/geometry'
@@ -28,6 +29,15 @@ function gridSize(dataset: ShmooDataset | null): { nx: number; ny: number } {
 function isValidCell(dataset: ShmooDataset | null, cell: CellIndex): boolean {
   const { nx, ny } = gridSize(dataset)
   return cell.ix >= 0 && cell.ix < nx && cell.iy >= 0 && cell.iy < ny
+}
+
+/**
+ * 把某个方向的下标夹进合法范围 [0, limit-1]。
+ * 切片切换方向时只对“该方向自己的一维”做夹取，绝不拿另一维的下标来兜底，
+ * 否则又会出现“列号沿用行号”的问题。limit <= 0 由调用方提前拦截。
+ */
+function clampSliceIndex(value: number, limit: number): number {
+  return Math.max(0, Math.min(value, limit - 1))
 }
 
 interface AppState {
@@ -78,6 +88,17 @@ interface AppState {
 
   /** 打开 CSV：读取（主进程）→ 解析（Worker）→ 写入 store */
   openCsv: () => Promise<void>
+  /**
+   * 统一的 CSV 载入流程：按钮 / Ctrl+O / 菜单 / 拖放导入最终都走这里。
+   * 入参是“已经拿到文本”的来源信息，解析仍然由同一个 Worker 完成，
+   * 这样任何入口都不会出现第二套解析逻辑。
+   */
+  loadCsvSource: (source: { name: string; text: string; path: string | null }) => Promise<void>
+  /**
+   * 拖放导入：先校验拖入的文件（必须恰好是 .csv / .txt 且不超过大小上限），
+   * 再读取文本交给 loadCsvSource。校验失败时只提示、不进入解析流程。
+   */
+  openDroppedFiles: (files: ArrayLike<File>) => Promise<void>
   /** 读取应用版本与平台信息 */
   loadAppInfo: () => Promise<void>
   setActiveSite: (siteId: string) => void
@@ -153,14 +174,27 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ statusText: '已取消导入', isParsing: false })
         return
       }
+      // 对话框与拖放共用同一条载入流程，避免出现两套解析逻辑
+      await get().loadCsvSource({ name: file.name, text: file.text, path: file.path })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      set({ error: `导入失败：${message}`, statusText: '导入失败', isParsing: false })
+    }
+  },
 
-      set({ fileName: file.name, statusText: '正在解析 CSV…' })
+  /**
+   * 统一的载入流程：拿到文件名 + 文本后，交给 Worker 解析并写入 store。
+   * 调用方负责置 isParsing（这样各入口可以有自己的状态文案）。
+   */
+  loadCsvSource: async (source) => {
+    set({ fileName: source.name, statusText: '正在解析 CSV…' })
 
+    try {
       // 解析放在 Web Worker：大文件不会卡住界面（Electron 推荐做法）
       const { dataset, report } = await parseCsvInWorker({
-        text: file.text,
-        fileName: file.name,
-        filePath: file.path
+        text: source.text,
+        fileName: source.name,
+        filePath: source.path
       })
 
       if (!dataset) {
@@ -197,6 +231,26 @@ export const useAppStore = create<AppState>((set, get) => ({
         selection: null,
         box: null
       })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      set({ error: `导入失败：${message}`, statusText: '导入失败', isParsing: false })
+    }
+  },
+
+  openDroppedFiles: async (files) => {
+    const picked = pickDroppedCsv(files)
+    if (!picked.ok) {
+      // 拖进来的不是 CSV（或根本没有文件）：明确提示，保持当前数据集不变
+      set({ error: picked.message, statusText: '拖放未导入' })
+      return
+    }
+    if (get().isParsing) return
+    set({ error: null, isParsing: true, statusText: `正在读取 ${picked.file.name}…` })
+    try {
+      // 拖入的文件由 Chromium 以 File 对象提供，直接读文本；
+      // 解析仍走 loadCsvSource → Worker，和按钮导入完全一致
+      const text = await picked.file.text()
+      await get().loadCsvSource({ name: picked.file.name, text, path: null })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       set({ error: `导入失败：${message}`, statusText: '导入失败', isParsing: false })
@@ -269,13 +323,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { dataset } = get()
     // 只有 2D 数据集才能切行/列；1D 本身就是一条曲线，不需要切片
     if (!dataset || dataset.kind !== '2d' || !dataset.yAxis) return
-    const limit = ref.axis === 'row' ? dataset.yAxis.values.length : dataset.xAxis.values.length
-    if (limit <= 0) return
-    const index = Math.max(0, Math.min(ref.index, limit - 1))
+    const nx = dataset.xAxis.values.length
+    const ny = dataset.yAxis.values.length
+    if (nx <= 0 || ny <= 0) return
+    // 双击格的两个下标分别夹进各自的轴范围：行用 y、列用 x，
+    // 越界时各自夹到最后一行 / 最后一列，互不覆盖
+    const x = clampSliceIndex(ref.x, nx)
+    const y = clampSliceIndex(ref.y, ny)
+    // 当前方向真正生效的下标：行方向 = 双击格的行号(y)，列方向 = 双击格的列号(x)
+    const index = ref.axis === 'row' ? y : x
     // 进入切片后 2D 不再显示：锁定与框选一并清掉（返回时从干净状态开始）
     set({
-      slice: { axis: ref.axis, index },
-      sliceMarker: { axis: ref.axis, index },
+      slice: { axis: ref.axis, index, x, y },
+      sliceMarker: { axis: ref.axis, index, x, y },
       selection: null,
       box: null
     })
@@ -284,11 +344,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSliceAxis: (axis) => {
     const { dataset, slice } = get()
     if (!dataset || dataset.kind !== '2d' || !dataset.yAxis || !slice) return
-    // 行号与列号不能直接复用：切换方向时按新轴长度夹紧
-    const limit = axis === 'row' ? dataset.yAxis.values.length : dataset.xAxis.values.length
-    if (limit <= 0) return
-    const index = Math.max(0, Math.min(slice.index, limit - 1))
-    set({ slice: { axis, index }, sliceMarker: { axis, index } })
+    const nx = dataset.xAxis.values.length
+    const ny = dataset.yAxis.values.length
+    if (nx <= 0 || ny <= 0) return
+    // 记住的两个下标各自夹取后再按新方向取值：
+    // 切到列方向用的是双击格的 x（列号），不再把行号当列号；
+    // 来回切换时 x / y 都原样保留，只是 axis 和 index 在变
+    const x = clampSliceIndex(slice.x, nx)
+    const y = clampSliceIndex(slice.y, ny)
+    const index = axis === 'row' ? y : x
+    set({ slice: { axis, index, x, y }, sliceMarker: { axis, index, x, y } })
   },
 
   closeSlice: () => set({ slice: null }),
