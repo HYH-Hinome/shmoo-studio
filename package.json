@@ -1,0 +1,43 @@
+{
+  "name": "shmoo-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shmoo 图桌面分析工具（ATE / 芯片测试）",
+  "main": "./out/main/index.js",
+  "author": "Shmoo Studio",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck:node": "tsc -p tsconfig.node.json --noEmit",
+    "typecheck:web": "tsc -p tsconfig.web.json --noEmit",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web && npm run typecheck:tests",
+    "typecheck:tests": "tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run",
+    "make-icon": "node scripts/make-icon.cjs",
+    "dist": "npm run build && electron-builder"
+  },
+  "dependencies": {
+    "pdfkit": "^0.20.2",
+    "zustand": "4.5.5"
+  },
+  "devDependencies": {
+    "@napi-rs/canvas": "^1.1.1",
+    "@types/node": "22.9.0",
+    "@types/pdfkit": "^0.17.7",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.3.4",
+    "electron": "33.4.11",
+    "electron-builder": "25.1.8",
+    "electron-vite": "2.3.0",
+    "jsdom": "^25.0.1",
+    "pdfjs-dist": "^4.8.69",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "typescript": "5.6.3",
+    "vite": "5.4.11",
+    "vitest": "^2.1.8"
+  }
+}

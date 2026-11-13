@@ -1,0 +1,49 @@
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 构建产物
+dist/
+out/
+release/
+build/
+.vite/
+*.tsbuildinfo
+
+# 日志与系统文件
+*.log
+npm-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地环境变量
+.env
+.env.local
+.env.*.local
+
+# 大体积 / 二进制产物（安装包、压缩包、导出结果、截图）
+*.exe
+*.msi
+*.dmg
+*.AppImage
+*.zip
+*.7z
+*.rar
+*.pdf
+screenshots/
+# 截图工作目录（截图工具临时落盘用，本地保留）
+.screenshots/
+# 阶段验收截图（本地保留，不进仓库）；README 正文引用的图用下面两条例外规则放行
+docs/shots/*
+!docs/shots/readme-2d.png
+!docs/shots/readme-pdf.png
+test-results/
+playwright-report/
+samples/large/
+exports/
+
+# 保留应用图标等必要静态资源
+!resources/**
+!resources/**/*.png

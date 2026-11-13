@@ -1,0 +1,797 @@
+import type { ShmooDataset, SiteGrid, SpecSide } from '@shared/types/shmoo'
+import { CELL_FAIL, CELL_PASS, CELL_UNKNOWN } from '@shared/types/shmoo'
+import { evaluatePoint } from '@shared/spec/evaluate'
+import {
+  BINARY_PALETTE,
+  CHART_STRUCTURE,
+  PASSFAIL_PALETTE,
+  binaryMarginColor,
+  binarySwatchStops,
+  passFailColor
+} from './colors'
+import {
+  DEFAULT_PADDING,
+  cellCenter,
+  computeGeometry,
+  pickTickIndices,
+  tickDecimals
+} from './geometry'
+import type { ChartPadding } from './geometry'
+import type { CanvasSize } from './render2d'
+import { CELL_GAP, cellCornerRadius, drawCellHatch } from './render2d'
+import {
+  RUN_BOUNDARY_LABEL,
+  computeValueScale,
+  findPassRuns,
+  findRunBoundaries,
+  pickPrimaryRun,
+  valueToY
+} from './oneD'
+import type { PassRun, RunBoundary, ValueScale } from './oneD'
+
+/**
+ * 1D Shmoo 绘制（Canvas 2D）。
+ *
+ * 两种形态：
+ *  - band：二值色带。每个采样点一根竖直色条，颜色沿用 A′ 二值色板 + margin 明度调制，
+ *    自动标出最长 PASS 区间的首末边界值与窗口宽度；
+ *  - curve：连续曲线。叠加 spec 上下限两条虚线，越界点用红点 + 深色描边强调。
+ *
+ * 与 2D 共用：DEFAULT_PADDING 的绘图区、刻度抽稀策略、结构色、缺失斜纹、入场动效开关。
+ * 这里不复用 2D 的 cellAlpha（它按行列做波浪展开）；1D 改用从左到右的水平揭示，
+ * 更符合“扫描”语义。
+ */
+
+/** 1D 形态 */
+export type OneDForm = 'band' | 'curve'
+
+const FONT_MONO = '10px "Cascadia Mono", "JetBrains Mono", Consolas, monospace'
+const FONT_MONO_SMALL = '9px "Cascadia Mono", "JetBrains Mono", Consolas, monospace'
+
+/**
+ * 色带高度：约占绘图区 34%，限制在 56–168px。
+ * 1D 只有一行数据，色带太薄会在大画布上显得空，太厚又会像色块墙，这里取中间值。
+ */
+function bandHeight(plotHeight: number): number {
+  return Math.max(56, Math.min(168, plotHeight * 0.34))
+}
+
+export interface OneDMotion {
+  /** false 时直接画最终状态（prefers-reduced-motion / 非入场重绘） */
+  enabled: boolean
+  /** 入场总时长（ms） */
+  duration: number
+  /** 入场已进行的毫秒数 */
+  elapsed: number
+}
+
+export interface OneDStaticInput {
+  dataset: ShmooDataset
+  site: SiteGrid
+  form: OneDForm
+  /** 每个采样点的 |margin| 归一化值；与 2D 共用同一套计算 */
+  tint: Float32Array | null
+  /** 纯二值数据集（0/1 pattern / 无 value）：色带与曲线点改用饱和平涂系统色 */
+  flatBinary: boolean
+  motion: OneDMotion
+  /**
+   * 自定义绘图区留白（可选）。
+   * 导出 PNG 时需要在顶部额外留出标题区，因此把 top 加大后传进来；
+   * 不传时保持界面使用的 DEFAULT_PADDING，屏幕绘制行为完全不变。
+   */
+  padding?: ChartPadding
+}
+
+export interface OneDInteractionInput {
+  dataset: ShmooDataset
+  site: SiteGrid
+  form: OneDForm
+  /** hover 的采样下标；null 表示无交互 */
+  index: number | null
+}
+
+/** 揭示进度（0–1）：入场时从左向右展开；未启用动效时恒为 1 */
+function revealProgress(motion: OneDMotion): number {
+  if (!motion.enabled || motion.duration <= 0) return 1
+  const t = Math.max(0, Math.min(1, motion.elapsed / motion.duration))
+  // easeOutCubic：起步快、收尾稳，和数据绘制动画的观感一致
+  return 1 - Math.pow(1 - t, 3)
+}
+
+function snap(value: number, dpr: number): number {
+  return Math.round(value * dpr) / dpr
+}
+
+/** x 轴（与 2D 相同的抽稀与首尾贴边策略） */
+function drawXAxis(
+  ctx: CanvasRenderingContext2D,
+  size: CanvasSize,
+  plot: { x: number; y: number; w: number; h: number },
+  xValues: number[],
+  xCenters: number[],
+  axis: ShmooDataset['xAxis']
+): void {
+  const { dpr, height } = size
+  ctx.font = FONT_MONO
+  ctx.textBaseline = 'middle'
+  ctx.textAlign = 'center'
+
+  const xDecimals = tickDecimals(xValues)
+  const labelMaxWidth = xValues.reduce(
+    (max, value) => Math.max(max, ctx.measureText(value.toFixed(xDecimals)).width),
+    0
+  )
+  const indices = pickTickIndices(xCenters, Math.max(36, labelMaxWidth + 16))
+
+  ctx.strokeStyle = CHART_STRUCTURE.axisLine
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.moveTo(plot.x, snap(plot.y + plot.h, dpr) + 0.5 / dpr)
+  ctx.lineTo(plot.x + plot.w, snap(plot.y + plot.h, dpr) + 0.5 / dpr)
+  ctx.stroke()
+
+  ctx.fillStyle = CHART_STRUCTURE.tickText
+  for (const i of indices) {
+    const x = snap(xCenters[i], dpr)
+    ctx.beginPath()
+    ctx.moveTo(x + 0.5 / dpr, plot.y + plot.h)
+    ctx.lineTo(x + 0.5 / dpr, plot.y + plot.h + 4)
+    ctx.stroke()
+
+    const text = xValues[i].toFixed(xDecimals)
+    const half = ctx.measureText(text).width / 2
+    if (x - half < plot.x) {
+      ctx.textAlign = 'left'
+      ctx.fillText(text, plot.x, plot.y + plot.h + 14)
+    } else if (x + half > plot.x + plot.w) {
+      ctx.textAlign = 'right'
+      ctx.fillText(text, plot.x + plot.w, plot.y + plot.h + 14)
+    } else {
+      ctx.textAlign = 'center'
+      ctx.fillText(text, x, plot.y + plot.h + 14)
+    }
+  }
+
+  ctx.fillStyle = CHART_STRUCTURE.axisTitle
+  ctx.textAlign = 'center'
+  const title = axis.unit ? `${axis.label} (${axis.unit})` : axis.label
+  ctx.fillText(title, plot.x + plot.w / 2, height - 10)
+}
+
+/** 右侧图例（色带模式）：PASS / FAIL / NO DATA；纯二值数据改为平涂系统色 */
+function drawBinaryLegend(
+  ctx: CanvasRenderingContext2D,
+  plot: { x: number; y: number; w: number },
+  rows: Array<{ label: string; state: number; hatch?: boolean }>,
+  flat: boolean
+): void {
+  const x0 = plot.x + plot.w + 18
+  let y = plot.y + 10
+  ctx.textBaseline = 'middle'
+  ctx.font = FONT_MONO_SMALL
+
+  for (const row of rows) {
+    if (row.hatch) {
+      ctx.fillStyle = BINARY_PALETTE.unknownBase
+      ctx.fillRect(x0, y - 5, 10, 10)
+      drawCellHatch(ctx, x0, y - 5, 10, 10, 4)
+    } else if (flat) {
+      ctx.fillStyle = passFailColor(row.state)
+      ctx.fillRect(x0, y - 5, 10, 10)
+      ctx.strokeStyle = 'rgba(147, 166, 186, 0.22)'
+      ctx.lineWidth = 0.5
+      ctx.strokeRect(x0 + 0.25, y - 4.75, 9.5, 9.5)
+    } else {
+      const stops = binarySwatchStops(row.state, 4)
+      const stepH = 10 / stops.length
+      stops.forEach((color, k) => {
+        ctx.fillStyle = color
+        ctx.fillRect(x0, y + 5 - (k + 1) * stepH, 10, Math.ceil(stepH))
+      })
+      ctx.strokeStyle = 'rgba(147, 166, 186, 0.22)'
+      ctx.lineWidth = 0.5
+      ctx.strokeRect(x0 + 0.25, y - 4.75, 9.5, 9.5)
+    }
+    ctx.fillStyle = CHART_STRUCTURE.legendText
+    ctx.textAlign = 'left'
+    ctx.fillText(row.label, x0 + 16, y)
+    y += 18
+  }
+
+  ctx.fillStyle = CHART_STRUCTURE.legendMuted
+  ctx.fillText(flat ? '二值判定' : '明度 ∝ |margin|', x0, y + 6)
+}
+
+/** 窗口标注文字：边界值 + 宽度，统一保留与 x 轴一致的小数位 */
+function windowText(run: PassRun | null, xDecimals: number, unit: string): string {
+  if (!run) return '无连续 PASS 区间'
+  const suffix = unit ? ` ${unit}` : ''
+  return `PASS 窗口 ${run.startX.toFixed(xDecimals)} – ${run.endX.toFixed(xDecimals)}${suffix} · 宽 ${run.width.toFixed(xDecimals)}${suffix}`
+}
+
+/**
+ * 二值色带形态。
+ * 布局：标题行（窗口信息）在绘图区顶部，色带垂直居中，边界虚线落到 x 轴。
+ */
+function drawBand(
+  ctx: CanvasRenderingContext2D,
+  size: CanvasSize,
+  dataset: ShmooDataset,
+  site: SiteGrid,
+  tint: Float32Array | null,
+  geometry: ReturnType<typeof computeGeometry>,
+  reveal: number,
+  flatPalette: boolean
+): void {
+  const { plot } = geometry
+  const { dpr } = size
+  const x = dataset.xAxis.values
+  const nx = x.length
+  const bandH = bandHeight(plot.h)
+  const bandTop = plot.y + (plot.h - bandH) / 2
+
+  const xDecimals = tickDecimals(x)
+  const runs = findPassRuns(x, site.pass)
+  const primary = pickPrimaryRun(runs)
+  // 主窗口的边界：双边 spec 下是 4 个（下限失效 / 恢复 + 上限恢复 / 失效）
+  const boundaries: RunBoundary[] = primary
+    ? findRunBoundaries(x, site.value, site.pass, primary, dataset.spec)
+    : []
+
+  // 1. 窗口信息：说明“这段色带里哪一截是通过的、边界在哪”
+  ctx.font = FONT_MONO
+  ctx.textBaseline = 'middle'
+  ctx.textAlign = 'left'
+  ctx.fillStyle = CHART_STRUCTURE.axisTitle
+  const more = runs.length > 1 ? `  · 另有 ${runs.length - 1} 段` : ''
+  ctx.fillText(
+    windowText(primary, xDecimals, dataset.xAxis.unit ?? '') + more,
+    plot.x,
+    plot.y + 12
+  )
+
+  // 1b. 边界值明细：双边时把 4 个边界都写出来，单边只写该侧两个
+  if (boundaries.length > 0) {
+    const unit = dataset.xAxis.unit ? ` (${dataset.xAxis.unit})` : ''
+    const detailed = boundaries
+      .map((b) => `${RUN_BOUNDARY_LABEL[b.role]} ${b.value.toFixed(xDecimals)}`)
+      .join(' · ')
+    const compact = `${boundaries.map((b) => b.value.toFixed(xDecimals)).join(' / ')}${unit}`
+    const text = ctx.measureText(`${detailed}${unit}`).width <= plot.w - 4
+      ? `${detailed}${unit}`
+      : compact
+    ctx.fillStyle = CHART_STRUCTURE.legendMuted
+    ctx.fillText(text, plot.x, plot.y + 28)
+  }
+
+  // 2. 色带：每点一根圆角竖条，条间 1px 缝；颜色与 2D 二值模式完全同源。
+  //    1D 的格子是宽扁矩形，圆角按短边（色带高度）计算并夹到 5px，不会变成胶囊。
+  const clipRight = plot.x + plot.w * reveal
+  const centers: number[] = []
+  const cellTop = bandTop + CELL_GAP / 2
+  const cellH = Math.max(0, bandH - CELL_GAP)
+
+  // 入场揭示：整条色带一起裁剪，避免最后一格出现“半个圆角”的突兀缺口
+  ctx.save()
+  ctx.beginPath()
+  ctx.rect(plot.x, bandTop, Math.max(0, plot.w * reveal), bandH)
+  ctx.clip()
+
+  for (let ix = 0; ix < nx; ix++) {
+    const left = geometry.x.edges[ix] + CELL_GAP / 2
+    const right = geometry.x.edges[ix + 1] - CELL_GAP / 2
+    const width = Math.max(0, right - left)
+    centers.push((left + right) / 2)
+    if (width <= 0 || left >= clipRight) continue
+
+    const index = ix
+    const state = site.pass[index]
+    const value = site.value[index]
+    const radius = cellCornerRadius(width, cellH)
+
+    if (state === CELL_UNKNOWN || !Number.isFinite(value)) {
+      ctx.fillStyle = BINARY_PALETTE.unknownBase
+      ctx.beginPath()
+      ctx.roundRect(left, cellTop, width, cellH, radius)
+      ctx.fill()
+      ctx.save()
+      ctx.beginPath()
+      ctx.roundRect(left, cellTop, width, cellH, radius)
+      ctx.clip()
+      drawCellHatch(ctx, left, cellTop, width, cellH)
+      ctx.restore()
+    } else {
+      // 纯二值数据没有 margin 可表达 → 平涂系统色；连续值保留明度调制
+      ctx.fillStyle = flatPalette
+        ? passFailColor(state)
+        : binaryMarginColor(state, tint ? tint[index] : 0.5)
+      ctx.beginPath()
+      ctx.roundRect(left, cellTop, width, cellH, radius)
+      ctx.fill()
+    }
+  }
+  ctx.restore()
+
+  // 4. 边界：每个边界采样点画一条虚线落到 x 轴，数值标在色带上方。
+  //    双边时会有 4 个（下限失效 / 下限恢复 / 上限恢复 / 上限失效），
+  //    相邻边界可能只隔一个采样点，因此数值分两行交错摆放，避免互相压住。
+  ctx.font = FONT_MONO_SMALL
+  ctx.textAlign = 'center'
+  // 注意：上一段逐格填充留下了红色 fillStyle，这里必须显式改回刻度文字色，否则标签会被染成红色
+  ctx.fillStyle = CHART_STRUCTURE.tickText
+  boundaries.forEach((boundary, order) => {
+    const bx = snap(centers[boundary.index] ?? plot.x, dpr)
+    if (bx > clipRight) return
+
+    ctx.strokeStyle = 'rgba(230, 238, 247, 0.55)'
+    ctx.setLineDash([4, 3])
+    ctx.beginPath()
+    ctx.moveTo(bx + 0.5 / dpr, snap(bandTop, dpr) - 6)
+    ctx.lineTo(bx + 0.5 / dpr, plot.y + plot.h)
+    ctx.stroke()
+    ctx.setLineDash([])
+
+    const label = boundary.value.toFixed(xDecimals)
+    const half = ctx.measureText(label).width / 2
+    // 奇偶交错：0/2 放上排，1/3 放下排
+    const labelY = bandTop - (order % 2 === 0 ? 14 : 27)
+    // 贴边时改成左/右对齐，避免边界值被裁掉
+    if (bx - half < plot.x) {
+      ctx.textAlign = 'left'
+      ctx.fillText(label, plot.x, labelY)
+    } else if (bx + half > plot.x + plot.w) {
+      ctx.textAlign = 'right'
+      ctx.fillText(label, plot.x + plot.w, labelY)
+    } else {
+      ctx.textAlign = 'center'
+      ctx.fillText(label, bx, labelY)
+    }
+  })
+
+  // 5. 图例
+  drawBinaryLegend(
+    ctx,
+    plot,
+    [
+      { label: 'PASS', state: CELL_PASS },
+      { label: 'FAIL', state: CELL_FAIL },
+      { label: 'NO DATA', state: CELL_UNKNOWN, hatch: true }
+    ],
+    flatPalette
+  )
+}
+
+/**
+ * spec 限值标签：在曲线之后画，保证不被数据压住。
+ *
+ * 位置固定在绘图区左侧：曲线右端常常正好落在限值附近，标签放右侧会和越界点打架。
+ * 默认压在线上方；若太靠近顶部（窗口说明文字），则翻到线下方。
+ * 文字底垫半透明底色，压到网格或曲线上也能读清。
+ */
+function drawSpecLabels(
+  ctx: CanvasRenderingContext2D,
+  plot: { x: number; y: number; w: number; h: number },
+  scale: ValueScale,
+  spec: ShmooDataset['spec'],
+  dpr: number,
+  safeTop: number
+): void {
+  ctx.font = FONT_MONO_SMALL
+  ctx.textBaseline = 'middle'
+  ctx.textAlign = 'left'
+
+  const rows: Array<{ value: number; label: string }> = []
+  if (typeof spec.max === 'number') rows.push({ value: spec.max, label: `SPEC MAX ${spec.max}` })
+  if (typeof spec.min === 'number') rows.push({ value: spec.min, label: `SPEC MIN ${spec.min}` })
+
+  for (const row of rows) {
+    const py = snap(valueToY(row.value, scale, plot.y, plot.h), dpr)
+    const above = py - 10
+    const y = above >= safeTop ? above : Math.min(py + 10, plot.y + plot.h - 8)
+    const width = ctx.measureText(row.label).width
+    ctx.fillStyle = 'rgba(7, 10, 15, 0.72)'
+    ctx.fillRect(plot.x + 3, y - 7, width + 8, 14)
+    ctx.fillStyle = CHART_STRUCTURE.legendText
+    ctx.fillText(row.label, plot.x + 7, y)
+  }
+}
+
+/** 三角形路径：up=true 顶点朝上（超上限），false 顶点朝下（低于下限） */
+function trianglePath(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  size: number,
+  up: boolean
+): void {
+  ctx.beginPath()
+  if (up) {
+    ctx.moveTo(cx, cy - size)
+    ctx.lineTo(cx + size * 0.92, cy + size * 0.72)
+    ctx.lineTo(cx - size * 0.92, cy + size * 0.72)
+  } else {
+    ctx.moveTo(cx, cy + size)
+    ctx.lineTo(cx + size * 0.92, cy - size * 0.72)
+    ctx.lineTo(cx - size * 0.92, cy - size * 0.72)
+  }
+  ctx.closePath()
+}
+
+/**
+ * 越界点标记（主图用）：用三角形方向区分“撞哪一边”，
+ * 先画深色放大底，再叠一层判定色，保证压在红带/曲线上仍可辨认。
+ */
+function drawFailMarker(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  side: SpecSide | null,
+  fill: string
+): void {
+  const up = side !== 'min'
+  trianglePath(ctx, cx, cy, 5.2, up)
+  ctx.fillStyle = '#0a0f16'
+  ctx.fill()
+  trianglePath(ctx, cx, cy, 3.5, up)
+  ctx.fillStyle = fill
+  ctx.fill()
+  ctx.strokeStyle = '#ff8b84'
+  ctx.lineWidth = 0.9
+  ctx.stroke()
+}
+
+/** 图例用的小三角标记 */
+function drawLegendMarker(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  side: SpecSide,
+  fill: string
+): void {
+  trianglePath(ctx, cx, cy, 4.2, side !== 'min')
+  ctx.fillStyle = fill
+  ctx.fill()
+}
+
+/** 连续曲线形态 */
+function drawCurve(
+  ctx: CanvasRenderingContext2D,
+  size: CanvasSize,
+  dataset: ShmooDataset,
+  site: SiteGrid,
+  geometry: ReturnType<typeof computeGeometry>,
+  scale: ValueScale,
+  reveal: number,
+  flat: boolean
+): void {
+  const { plot } = geometry
+  const { dpr } = size
+  const x = dataset.xAxis.values
+  const values = site.value
+  const nx = x.length
+  const yDecimals = tickDecimals(scale.ticks)
+  const yTicks = scale.ticks
+  // 纯二值数据集没有 margin：点/标记改用 iOS 系统色，其余曲线逻辑不变
+  const failFill = flat ? PASSFAIL_PALETTE.fail : BINARY_PALETTE.failAnchor
+  const passFill = flat ? PASSFAIL_PALETTE.pass : BINARY_PALETTE.passAnchor
+
+  // 1. 横向网格 + y 刻度
+  ctx.font = FONT_MONO
+  ctx.textBaseline = 'middle'
+  ctx.strokeStyle = 'rgba(51, 70, 90, 0.28)'
+  ctx.lineWidth = 1
+  for (const tick of yTicks) {
+    const py = snap(valueToY(tick, scale, plot.y, plot.h), dpr)
+    ctx.beginPath()
+    ctx.moveTo(plot.x, py + 0.5 / dpr)
+    ctx.lineTo(plot.x + plot.w, py + 0.5 / dpr)
+    ctx.stroke()
+  }
+  ctx.fillStyle = CHART_STRUCTURE.tickText
+  ctx.textAlign = 'right'
+  for (const tick of yTicks) {
+    const py = snap(valueToY(tick, scale, plot.y, plot.h), dpr)
+    ctx.beginPath()
+    ctx.moveTo(plot.x - 4, py + 0.5 / dpr)
+    ctx.lineTo(plot.x, py + 0.5 / dpr)
+    ctx.stroke()
+    ctx.fillText(tick.toFixed(yDecimals), plot.x - 8, py)
+  }
+
+  // y 轴标题
+  ctx.save()
+  ctx.translate(14, plot.y + plot.h / 2)
+  ctx.rotate(-Math.PI / 2)
+  ctx.font = FONT_MONO
+  ctx.fillStyle = CHART_STRUCTURE.axisTitle
+  ctx.textAlign = 'center'
+  const yTitle = dataset.valueUnit
+    ? `${dataset.valueLabel} (${dataset.valueUnit})`
+    : dataset.valueLabel
+  ctx.fillText(yTitle, 0, 0)
+  ctx.restore()
+
+  ctx.strokeStyle = CHART_STRUCTURE.axisLine
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.moveTo(snap(plot.x, dpr) + 0.5 / dpr, plot.y)
+  ctx.lineTo(snap(plot.x, dpr) + 0.5 / dpr, plot.y + plot.h)
+  ctx.stroke()
+
+  // 2. spec 区域：上限以上、下限以下铺极淡的红，先让人看到“哪里是禁区”
+  // flat（纯二值）时与平涂 FAIL 色 #E04037 同源，避免禁区底色和点色不是一个红
+  const spec = dataset.spec
+  if (typeof spec.max === 'number') {
+    const py = valueToY(spec.max, scale, plot.y, plot.h)
+    ctx.fillStyle = flat ? 'rgba(224, 64, 55, 0.07)' : 'rgba(181, 86, 79, 0.07)'
+    ctx.fillRect(plot.x, plot.y, plot.w, Math.max(0, py - plot.y))
+  }
+  if (typeof spec.min === 'number') {
+    const py = valueToY(spec.min, scale, plot.y, plot.h)
+    ctx.fillStyle = flat ? 'rgba(224, 64, 55, 0.07)' : 'rgba(181, 86, 79, 0.07)'
+    ctx.fillRect(plot.x, py, plot.w, Math.max(0, plot.y + plot.h - py))
+  }
+
+  // 3. spec 线：中性白 + 虚线，不用红色，避免与“越界点”抢语义
+  //    标签单独放到曲线之后画（见下方 drawSpecLabels），否则会被曲线和数据点压住
+  ctx.font = FONT_MONO_SMALL
+  const drawSpecLine = (value: number): void => {
+    const py = snap(valueToY(value, scale, plot.y, plot.h), dpr)
+    ctx.strokeStyle = 'rgba(230, 238, 247, 0.55)'
+    ctx.lineWidth = 1
+    ctx.setLineDash([5, 4])
+    ctx.beginPath()
+    ctx.moveTo(plot.x, py + 0.5 / dpr)
+    ctx.lineTo(plot.x + plot.w, py + 0.5 / dpr)
+    ctx.stroke()
+    ctx.setLineDash([])
+  }
+  if (typeof spec.max === 'number') drawSpecLine(spec.max)
+  if (typeof spec.min === 'number') drawSpecLine(spec.min)
+  if (typeof spec.target === 'number') {
+    const py = snap(valueToY(spec.target, scale, plot.y, plot.h), dpr)
+    ctx.strokeStyle = 'rgba(56, 207, 224, 0.28)'
+    ctx.setLineDash([2, 4])
+    ctx.beginPath()
+    ctx.moveTo(plot.x, py + 0.5 / dpr)
+    ctx.lineTo(plot.x + plot.w, py + 0.5 / dpr)
+    ctx.stroke()
+    ctx.setLineDash([])
+  }
+
+  // 4. 面积淡填充 + 曲线：按连续有效段拆分，缺失点处断开
+  const px: number[] = []
+  for (let ix = 0; ix < nx; ix++) px.push(cellCenter(geometry, ix, 0).x)
+  const segments: Array<Array<{ x: number; y: number }>> = []
+  let current: Array<{ x: number; y: number }> = []
+  for (let ix = 0; ix < nx; ix++) {
+    const v = values[ix]
+    if (!Number.isFinite(v)) {
+      if (current.length > 0) segments.push(current)
+      current = []
+      continue
+    }
+    current.push({ x: px[ix], y: valueToY(v, scale, plot.y, plot.h) })
+  }
+  if (current.length > 0) segments.push(current)
+
+  ctx.save()
+  ctx.beginPath()
+  ctx.rect(plot.x, plot.y, plot.w * reveal, plot.h)
+  ctx.clip()
+
+  for (const segment of segments) {
+    if (segment.length < 2) continue
+    ctx.beginPath()
+    ctx.moveTo(segment[0].x, plot.y + plot.h)
+    for (const point of segment) ctx.lineTo(point.x, point.y)
+    ctx.lineTo(segment[segment.length - 1].x, plot.y + plot.h)
+    ctx.closePath()
+    ctx.fillStyle = 'rgba(38, 150, 138, 0.10)'
+    ctx.fill()
+
+    ctx.beginPath()
+    ctx.moveTo(segment[0].x, segment[0].y)
+    for (let i = 1; i < segment.length; i++) ctx.lineTo(segment[i].x, segment[i].y)
+    ctx.strokeStyle = '#7fd3c6'
+    ctx.lineWidth = 1.6
+    ctx.lineJoin = 'round'
+    ctx.stroke()
+  }
+
+  // 5. 采样点：点数少时全画；点数多时只保留越界点，避免糊成一条粗线
+  const drawAllPoints = nx <= 60
+  for (let ix = 0; ix < nx; ix++) {
+    const v = values[ix]
+    if (!Number.isFinite(v)) continue
+    const state = site.pass[ix]
+    if (state !== CELL_FAIL && !drawAllPoints) continue
+    const cx = px[ix]
+    const cy = valueToY(v, scale, plot.y, plot.h)
+    if (state === CELL_FAIL) {
+      // 越界点：三角形方向表示撞哪一边（▲ 超上限 / ▼ 低于下限）
+      drawFailMarker(ctx, cx, cy, evaluatePoint(v, dataset.spec).side, failFill)
+    } else if (state === CELL_PASS) {
+      ctx.beginPath()
+      ctx.arc(cx, cy, 2.1, 0, Math.PI * 2)
+      ctx.fillStyle = passFill
+      ctx.fill()
+    }
+  }
+  ctx.restore()
+
+  // 6. spec 标签：放在曲线之后画，避免被曲线/数据点压住
+  drawSpecLabels(ctx, plot, scale, spec, dpr, plot.y + 26)
+
+  // 7. 窗口信息与图例
+  const xDecimals = tickDecimals(x)
+  const runs = findPassRuns(x, site.pass)
+  const primary = pickPrimaryRun(runs)
+  ctx.font = FONT_MONO
+  ctx.textAlign = 'left'
+  ctx.textBaseline = 'middle'
+  ctx.fillStyle = CHART_STRUCTURE.axisTitle
+  ctx.fillText(windowText(primary, xDecimals, dataset.xAxis.unit ?? ''), plot.x, plot.y + 12)
+
+  const x0 = plot.x + plot.w + 18
+  let y = plot.y + 10
+  ctx.font = FONT_MONO_SMALL
+  ctx.strokeStyle = '#7fd3c6'
+  ctx.lineWidth = 1.6
+  ctx.beginPath()
+  ctx.moveTo(x0, y)
+  ctx.lineTo(x0 + 10, y)
+  ctx.stroke()
+  ctx.fillStyle = CHART_STRUCTURE.legendText
+  ctx.textAlign = 'left'
+  ctx.fillText('实测值', x0 + 16, y)
+
+  y += 18
+  ctx.beginPath()
+  ctx.arc(x0 + 5, y, 2.1, 0, Math.PI * 2)
+  ctx.fillStyle = passFill
+  ctx.fill()
+  ctx.fillText('合格点', x0 + 16, y)
+
+  // 越界点图例：双边 spec 用 ▲ / ▼ 分别表示超上限与低于下限；
+  // 单边只画对应方向的一行，避免图例出现永远用不到的方向
+  const hasMin = typeof spec.min === 'number' && spec.mode !== 'none'
+  const hasMax = typeof spec.max === 'number' && spec.mode !== 'none'
+  if (hasMin && hasMax) {
+    y += 18
+    drawLegendMarker(ctx, x0 + 5, y, 'max', failFill)
+    ctx.fillStyle = CHART_STRUCTURE.legendText
+    ctx.fillText('超上限', x0 + 16, y)
+
+    y += 18
+    drawLegendMarker(ctx, x0 + 5, y, 'min', failFill)
+    ctx.fillStyle = CHART_STRUCTURE.legendText
+    ctx.fillText('低于下限', x0 + 16, y)
+  } else {
+    y += 18
+    drawLegendMarker(ctx, x0 + 5, y, hasMax ? 'max' : 'min', failFill)
+    ctx.fillStyle = CHART_STRUCTURE.legendText
+    ctx.fillText('越界点', x0 + 16, y)
+  }
+
+  y += 18
+  ctx.strokeStyle = 'rgba(230, 238, 247, 0.55)'
+  ctx.lineWidth = 1
+  ctx.setLineDash([5, 4])
+  ctx.beginPath()
+  ctx.moveTo(x0, y)
+  ctx.lineTo(x0 + 10, y)
+  ctx.stroke()
+  ctx.setLineDash([])
+  ctx.fillStyle = CHART_STRUCTURE.legendMuted
+  ctx.fillText('SPEC 限值', x0 + 16, y)
+}
+
+/** 静态层：底色 → 内容 → 轴 → 图例 */
+export function drawOneDStatic(
+  ctx: CanvasRenderingContext2D,
+  size: CanvasSize,
+  input: OneDStaticInput
+): void {
+  const { dataset, site, form, tint, flatBinary, motion, padding } = input
+  const { width, height, dpr } = size
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, width, height)
+  ctx.fillStyle = CHART_STRUCTURE.canvasBg
+  ctx.fillRect(0, 0, width, height)
+
+  const x = dataset.xAxis.values
+  if (x.length === 0) return
+
+  // y 轴传一个占位值：1D 只借用 x 轴的边界/中心计算，plot 尺寸与 2D 完全一致
+  const geometry = computeGeometry(width, height, padding ?? DEFAULT_PADDING, x, [0])
+  const { plot } = geometry
+  if (plot.w <= 2 || plot.h <= 2) return
+
+  ctx.fillStyle = CHART_STRUCTURE.plotBg
+  ctx.fillRect(plot.x, plot.y, plot.w, plot.h)
+  ctx.strokeStyle = CHART_STRUCTURE.activeFrame
+  ctx.lineWidth = 1
+  ctx.strokeRect(
+    snap(plot.x, dpr) + 0.5 / dpr,
+    snap(plot.y, dpr) + 0.5 / dpr,
+    plot.w,
+    plot.h
+  )
+
+  const reveal = revealProgress(motion)
+  const xCenters = x.map((_, ix) => cellCenter(geometry, ix, 0).x)
+
+  if (form === 'band') {
+    drawBand(ctx, size, dataset, site, tint, geometry, reveal, flatBinary)
+  } else {
+    // 刻度密度跟着绘图区高度走：高容器多给几条，矮容器少给几条，避免出现大片空白
+    const tickCount = Math.max(4, Math.min(10, Math.round(plot.h / 70)))
+    const scale = computeValueScale(site.value, dataset.spec, tickCount)
+    if (scale) {
+      drawCurve(ctx, size, dataset, site, geometry, scale, reveal, flatBinary)
+    } else {
+      ctx.font = FONT_MONO
+      ctx.fillStyle = CHART_STRUCTURE.legendMuted
+      ctx.textAlign = 'center'
+      ctx.fillText('无有效测量值', plot.x + plot.w / 2, plot.y + plot.h / 2)
+    }
+  }
+
+  drawXAxis(ctx, size, plot, x, xCenters, dataset.xAxis)
+}
+
+/** 交互层：竖线吸附 + 当前点圈选（tooltip 由 React 组件绘制） */
+export function drawOneDInteraction(
+  ctx: CanvasRenderingContext2D,
+  size: CanvasSize,
+  input: OneDInteractionInput
+): void {
+  const { dataset, site, form, index } = input
+  const { width, height, dpr } = size
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, width, height)
+  if (index === null || index < 0) return
+
+  const x = dataset.xAxis.values
+  if (index >= x.length) return
+
+  const geometry = computeGeometry(width, height, DEFAULT_PADDING, x, [0])
+  const { plot } = geometry
+  if (plot.w <= 2 || plot.h <= 2) return
+
+  const cx = snap(cellCenter(geometry, index, 0).x, dpr)
+  ctx.strokeStyle = CHART_STRUCTURE.crosshair
+  ctx.lineWidth = 1
+  ctx.setLineDash([3, 3])
+  ctx.beginPath()
+  ctx.moveTo(cx + 0.5 / dpr, plot.y)
+  ctx.lineTo(cx + 0.5 / dpr, plot.y + plot.h)
+  ctx.stroke()
+  ctx.setLineDash([])
+
+  // 曲线模式额外圈出当前采样点；色带模式只显示竖线（带子本身就是“点”）
+  if (form === 'curve') {
+    const scale = computeValueScale(site.value, dataset.spec)
+    const value = site.value[index]
+    if (scale && Number.isFinite(value)) {
+      const cy = snap(valueToY(value, scale, plot.y, plot.h), dpr)
+      ctx.beginPath()
+      ctx.arc(cx, cy, 4.5, 0, Math.PI * 2)
+      ctx.strokeStyle = CHART_STRUCTURE.hoverBorder
+      ctx.lineWidth = 1.5
+      ctx.stroke()
+    }
+  } else {
+    // 色带模式：把当前采样点所在的竖条描出来
+    const left = snap(geometry.x.edges[index], dpr)
+    const right = snap(geometry.x.edges[index + 1], dpr)
+    const bandH = bandHeight(plot.h)
+    const bandTop = plot.y + (plot.h - bandH) / 2
+    ctx.strokeStyle = CHART_STRUCTURE.hoverBorder
+    ctx.lineWidth = 1.5
+    ctx.strokeRect(left, snap(bandTop, dpr), right - left, snap(bandH, dpr))
+  }
+}
