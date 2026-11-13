@@ -6,6 +6,16 @@
 - 运行方式：完全离线，不连测试机、不访问网络、不依赖云端
 - 界面语言：中文
 
+## 界面预览
+
+![2D Shmoo 主界面](docs/shots/readme-2d.png)
+
+2D 二值 Shmoo：左侧按 site 列出点数与通过率，中间是 30 × 30 色块图（青色 PASS、红色 FAIL、斜纹为无数据），右侧可直接改 spec 上下限并即时重算。
+
+![PDF 汇总页](docs/shots/readme-pdf.png)
+
+导出的 PDF 汇总页：第一页汇总各站点通过率与数据集基本信息，之后每站一页矢量图，文字可选中、可搜索。
+
 ## 这个工具是干什么的
 
 测试机（V93000、J750、Chroma 等）跑完 Shmoo 后会导出一份“一行一个测量点”的 CSV。Shmoo Studio 把这堆数字变成能直接看的图：
@@ -289,3 +299,18 @@ release\             electron-builder 产物（不入库）
 - **某些格子是斜纹**：这些位置在 CSV 里没有数据（`value` 为空或缺行），不是 FAIL，也不进通过率分母。
 - **改了 spec 但 CSV 的 pass 列颜色没变**：`pass_source: file` 时以文件里的 pass 为准，spec 只影响统计口径；需要让 spec 说了算就写成 `pass_source: derived`。
 - **PDF 里的中文**：程序自带 Noto Sans SC 子集并嵌入 PDF，不需要目标机器装字体。
+
+## 许可证
+
+本项目以 [MIT 许可证](LICENSE) 发布：可以自由使用、修改、商用和再分发，只需保留版权声明与许可声明。
+
+`LICENSE` 里的版权署名目前是占位写法「Shmoo Studio contributors」；如需以自己的姓名或组织名义发布，替换首行即可。
+
+## 第三方组件
+
+| 组件 | 用途 | 许可证 |
+| --- | --- | --- |
+| Noto Sans SC（字符子集，内嵌） | 导出矢量 PDF 时嵌入中文字形，目标机器无需安装字体 | SIL Open Font License 1.1，见 `assets/fonts/LICENSE-NotoSansSC.txt` |
+| JetBrains Mono（拉丁字符子集，内嵌） | 界面数字与坐标刻度的等宽字形 | SIL Open Font License 1.1，见 `src/renderer/assets/fonts/OFL.txt` |
+
+两款字体均按 OFL 1.1 随程序嵌入分发，原版权与许可声明已保留在仓库对应目录中。

@@ -5,7 +5,7 @@
   "description": "Shmoo 图桌面分析工具（ATE / 芯片测试）",
   "main": "./out/main/index.js",
   "author": "Shmoo Studio",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",

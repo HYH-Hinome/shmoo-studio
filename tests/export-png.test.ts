@@ -12,8 +12,8 @@
  *  - 生成的 PNG 字节有合法文件头与 IHDR 尺寸（文件能正常打开）。
  */
 
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { delimiter, join } from 'node:path'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { GlobalFonts, Path2D as NapiPath2D, createCanvas } from '@napi-rs/canvas'
 import { parseShmooCsv } from '@shared/csv/parser'
@@ -54,15 +54,26 @@ beforeAll(() => {
       return createCanvas(96, 96)
     }
   }
-  // 让中文标题 / 刻度在测试画布上也能真实测量（缺失时退回默认字体，不影响颜色断言）
-  for (const [file, family] of [
-    ['C:\\Windows\\Fonts\\msyh.ttc', 'Microsoft YaHei'],
-    ['C:\\Windows\\Fonts\\consola.ttf', 'Consolas']
-  ] as const) {
-    try {
-      GlobalFonts.registerFromPath(file, family)
-    } catch {
-      // 非 Windows 或字体不存在时静默跳过：颜色断言不依赖字形
+  // 让中文标题 / 刻度在测试画布上也能真实测量（缺失时退回默认字体，不影响颜色断言）。
+  // 字体路径不写死：优先读环境变量 SHMOO_TEST_FONTS（目录列表，Windows 用分号、
+  // macOS/Linux 用冒号分隔），未设置时在 Windows 上回落到系统字体目录；
+  // 其他平台找不到字体文件就跳过，测试仍可通过。
+  const fontDirs = [
+    ...(process.env.SHMOO_TEST_FONTS ?? '').split(delimiter),
+    process.platform === 'win32' ? 'C:\\Windows\\Fonts' : ''
+  ].filter(Boolean)
+  for (const dir of fontDirs) {
+    for (const [file, family] of [
+      ['msyh.ttc', 'Microsoft YaHei'],
+      ['consola.ttf', 'Consolas']
+    ] as const) {
+      const fontPath = join(dir, file)
+      if (!existsSync(fontPath)) continue
+      try {
+        GlobalFonts.registerFromPath(fontPath, family)
+      } catch {
+        // 字体文件损坏或格式不支持时静默跳过：颜色断言不依赖字形
+      }
     }
   }
 })

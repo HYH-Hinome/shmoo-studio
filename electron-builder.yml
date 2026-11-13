@@ -9,7 +9,7 @@ files:
   - package.json
   # 矢量 PDF 导出需要嵌入中文字体（Noto Sans SC 子集，OFL 1.1 允许嵌入分发）
   - assets/fonts/**/*
-# 内网离线工具：不配置 publish，electron-builder 就不会生成 app-update.yml，
+# 离线工具：不配置 publish，electron-builder 就不会生成 app-update.yml，
 # 产物里也不会带任何自动更新地址（已由打包后检查确认）。
 asar: true
 win:

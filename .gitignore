@@ -33,8 +33,12 @@ desktop.ini
 *.rar
 *.pdf
 screenshots/
-# 阶段验收截图（本地保留，不进仓库）
-docs/shots/
+# 截图工作目录（截图工具临时落盘用，本地保留）
+.screenshots/
+# 阶段验收截图（本地保留，不进仓库）；README 正文引用的图用下面两条例外规则放行
+docs/shots/*
+!docs/shots/readme-2d.png
+!docs/shots/readme-pdf.png
 test-results/
 playwright-report/
 samples/large/
