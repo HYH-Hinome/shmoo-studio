@@ -1,5 +1,11 @@
 # Shmoo Studio
 
+[![Version](https://img.shields.io/badge/version-v0.1.0-475569?style=flat-square)](https://github.com/HYH-Hinome/shmoo-studio/releases/tag/v0.1.0)
+[![License](https://img.shields.io/badge/license-MIT-475569?style=flat-square)](https://github.com/HYH-Hinome/shmoo-studio/blob/main/LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20x64-475569?style=flat-square)](https://github.com/HYH-Hinome/shmoo-studio/releases/tag/v0.1.0)
+
+[仓库](https://github.com/HYH-Hinome/shmoo-studio) · [下载 v0.1.0](https://github.com/HYH-Hinome/shmoo-studio/releases/tag/v0.1.0)
+
 面向 ATE（芯片测试）工程师的离线桌面工具：导入测试机导出的 CSV 长表，直接看 1D / 2D Shmoo 图，按 site 切换、临时改 spec 即时重算，并把图导出成 PNG 或矢量 PDF。
 
 - 平台：Windows 10 / 11（x64）
