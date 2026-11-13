@@ -52,6 +52,38 @@ function revealMainWindow(): void {
   mainWindow.moveTop()
 }
 
+/**
+ * 强制让主窗口真正可见。
+ *
+ * 背景（Windows 平台的已知坑）：
+ * 若父进程通过 STARTUPINFO（STARTF_USESHOWWINDOW + SW_HIDE）把本程序隐藏拉起，
+ * Windows 会把本进程**第一次** ShowWindow 的显示方式悄悄改写成"隐藏"。
+ * 而 Electron 的 BrowserWindow 用客户端缓存记录可见状态：show() 调用过一次后
+ * 内部就认为已可见，后续 show() 不会再下发原生 ShowWindow。结果就是
+ * "进程在跑、页面渲染完、show() 也执行了，但原生窗口 WS_VISIBLE=0"，
+ * 用户看到的是双击没反应（同条件下 Rust/winit 程序正常，因为它每次都会下发
+ * 原生 ShowWindow，而 Electron 只下发一次）。
+ *
+ * 兜底方案：show() 之后再补一次 hide() → show()。
+ * 系统只会覆盖进程的第一次 ShowWindow，第二次起会正常下发 SW_HIDE / SW_SHOW，
+ * 窗口因此能真正显示出来。
+ *
+ * 正常启动时这两次调用同步完成，中间没有消息泵也没有绘制机会，用户不会看到闪烁；
+ * 不改窗口尺寸、位置、最大化状态与标题栏样式，也不影响 second-instance 的聚焦逻辑。
+ *
+ * 说明：Electron 没有公开"原生窗口是否真的可见"的查询接口，win.isVisible()
+ * 返回的恰恰是上面那个客户端缓存值（问题本身），所以这里不做条件判断。
+ */
+function forceShowWindow(win: BrowserWindow): void {
+  win.show()
+  win.hide()
+  win.show()
+  // 部分隐藏启动场景下第二次 SW_SHOW 会被系统按"最小化"呈现（实测窗口
+  // WS_VISIBLE=1 但 IsIconic=1，任务栏有图标却看不到界面），再补一次还原；
+  // 正常启动时窗口本来就不是最小化，restore() 是空操作。
+  win.restore()
+}
+
 /** 创建主窗口 */
 function createMainWindow(): void {
   const win = new BrowserWindow({
@@ -80,9 +112,25 @@ function createMainWindow(): void {
 
   mainWindow = win
 
-  // 首帧渲染完成后再显示，避免深色应用常见的白屏闪烁
-  win.once('ready-to-show', () => win.show())
+  // 首次呈现只允许执行一次：ready-to-show 与下面的兜底定时器可能先后触发
+  let revealed = false
+  const revealOnce = (): void => {
+    if (revealed || win.isDestroyed()) return
+    revealed = true
+    forceShowWindow(win)
+  }
+
+  // 正常路径：首帧渲染完成后再显示，避免深色应用常见的白屏闪烁
+  win.once('ready-to-show', revealOnce)
+
+  // 兜底路径：被 STARTUPINFO/SW_HIDE 隐藏拉起时，Chromium 因为原生窗口不可见
+  // 迟迟不产生首帧，ready-to-show 根本不会触发（实测隐藏启动 10s 内一次都没触发），
+  // 窗口就永远是隐形的。这里用定时器兜底，到点直接强制显示；
+  // 正常启动时 ready-to-show 通常远早于 2s，会先把 revealed 置位，定时器到点后空转。
+  const revealFallbackTimer = setTimeout(revealOnce, 2000)
+
   win.on('closed', () => {
+    clearTimeout(revealFallbackTimer)
     mainWindow = null
   })
 
