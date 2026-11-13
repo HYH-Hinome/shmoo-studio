@@ -35,6 +35,23 @@ function applyProductionCsp(): void {
   })
 }
 
+/**
+ * 显示并聚焦主窗口。
+ *
+ * 背景：外部启动器可能以隐藏窗口方式拉起首个实例，此时窗口虽然创建成功，
+ * 但对用户完全不可见，后续双击只会静默退出，表现为“毫无反应”。
+ * 第二个实例启动时调用本函数把已有窗口显式呈现出来。
+ */
+function revealMainWindow(): void {
+  if (!mainWindow) return
+  // 先显示（隐藏状态下 show() 才会让窗口出现），再从最小化恢复
+  if (!mainWindow.isVisible()) mainWindow.show()
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  // 置前 + 聚焦，避免窗口被其他程序压住而用户仍以为没反应
+  mainWindow.focus()
+  mainWindow.moveTop()
+}
+
 /** 创建主窗口 */
 function createMainWindow(): void {
   const win = new BrowserWindow({
@@ -96,9 +113,14 @@ if (!gotSingleInstanceLock) {
   app.quit()
 } else {
   app.on('second-instance', () => {
-    if (!mainWindow) return
-    if (mainWindow.isMinimized()) mainWindow.restore()
-    mainWindow.focus()
+    // 用户第二次启动时不再静默退出，而是把已有窗口显示/还原/置前；
+    // 第二个实例本身仍会在下面 requestSingleInstanceLock 失败分支中退出。
+    if (!mainWindow) {
+      // 首个实例可能还没创建完窗口：等窗口创建后再呈现一次，避免这次点击被吞掉
+      app.once('browser-window-created', () => revealMainWindow())
+      return
+    }
+    revealMainWindow()
   })
 
   void app.whenReady().then(() => {
