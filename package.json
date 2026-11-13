@@ -15,6 +15,7 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web && npm run typecheck:tests",
     "typecheck:tests": "tsc -p tsconfig.test.json --noEmit",
     "test": "vitest run",
+    "make-icon": "node scripts/make-icon.cjs",
     "dist": "npm run build && electron-builder"
   },
   "dependencies": {
