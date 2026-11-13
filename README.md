@@ -14,13 +14,21 @@
 
 ## 界面预览
 
-![2D Shmoo 主界面](docs/shots/readme-2d.png)
+![2D 二值 Shmoo](docs/shots/readme-2d-binary.png)
 
-2D 二值 Shmoo：左侧按 site 列出点数与通过率，中间是 30 × 30 色块图（青色 PASS、红色 FAIL、斜纹为无数据），右侧可直接改 spec 上下限并即时重算。
+2D 二值 Shmoo：青色 PASS、红色 FAIL、斜纹是无数据点；spec 由「单边上下限」推导，右侧改上下限会立刻重算整张图。
 
-![PDF 汇总页](docs/shots/readme-pdf.png)
+![2D 热力 Shmoo](docs/shots/readme-2d-heat.png)
 
-导出的 PDF 汇总页：第一页汇总各站点通过率与数据集基本信息，之后每站一页矢量图，文字可选中、可搜索。
+切到「热力」模式：连续测量值按冷→暖色带映射，右侧色标标出电压范围，边缘的深色裂口就是 spec 边界穿过的行。
+
+![1D Shmoo](docs/shots/readme-1d.png)
+
+1D Shmoo（色带形态）：每一列是一个测试点，虚线为 spec 上下限，顶部直接给出最长连续通过窗口和余量。
+
+![PDF 导出页](docs/shots/readme-pdf.png)
+
+导出的 PDF 站点页：矢量绘制、文字可选中，色标、图例和页码都按打印尺寸排好。
 
 ## 这个工具是干什么的
 
